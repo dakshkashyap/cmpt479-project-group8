@@ -1,0 +1,229 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 347226c3..01081b12 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -93,7 +93,7 @@ message(STATUS "LLVM Version Integer: ${LLVM_VERSION_INTEGER}")
+ set(Boost_USE_STATIC_LIBS ${USE_STATIC_LIBS})
+ set(Boost_USE_MULTITHREADED OFF)
+ set(Boost_USE_STATIC_RUNTIME OFF)
+-find_package(Boost 1.61 REQUIRED COMPONENTS system filesystem iostreams regex)
++find_package(Boost 1.61 REQUIRED COMPONENTS filesystem iostreams regex)
+ message(STATUS "Found Boost_LIBRARY_DIRS: ${Boost_LIBRARY_DIRS}")
+ include_directories("${Boost_INCLUDE_DIRS}")
+ link_directories(${Boost_LIBRARY_DIRS})
+@@ -434,6 +434,7 @@ if (GENERATE_TOOLS)
+     add_subdirectory(tools/audio)
+     add_subdirectory(tools/util)
+     add_subdirectory(tools/csv)
++    add_subdirectory(tools/utf16validate)
+ endif()
+ 
+ # Kernel Tests
+diff --git a/tools/utf16validate/CMakeLists.txt b/tools/utf16validate/CMakeLists.txt
+new file mode 100644
+index 00000000..9cd58967
+--- /dev/null
++++ b/tools/utf16validate/CMakeLists.txt
+@@ -0,0 +1,14 @@
++#  Part of the Parabix Project, under the Open Software License 3.0.
++#  SPDX-License-Identifier: OSL-3.0
++
++# module: utf16validate
++
++parabix_add_executable(
++NAME
++    utf16validate
++SRC
++    utf16validate.cpp
++DEPS
++    kernel.core
++    kernel.io
++)
+diff --git a/tools/utf16validate/utf16validate.cpp b/tools/utf16validate/utf16validate.cpp
+new file mode 100644
+index 00000000..cfd141bf
+--- /dev/null
++++ b/tools/utf16validate/utf16validate.cpp
+@@ -0,0 +1,182 @@
++/*
++ *  Part of the Parabix Project, under the Open Software License 3.0.
++ *  SPDX-License-Identifier: OSL-3.0
++ */
++
++#include <toolchain/toolchain.h>
++#include <kernel/pipeline/driver/cpudriver.h>
++#include <kernel/pipeline/program_builder.h>
++#include <kernel/io/source_kernel.h>
++#include <kernel/core/kernel.h>
++#include <kernel/core/kernel_builder.h>
++#include <kernel/core/streamset.h>
++#include <llvm/Support/CommandLine.h>
++#include <iostream>
++#include <string>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <unistd.h>
++
++using namespace llvm;
++using namespace codegen;
++using namespace kernel;
++
++static cl::OptionCategory utf16validateOptions("utf16validate Options",
++                                               "UTF-16 validation control options.");
++
++static cl::list<std::string> inputFiles(cl::Positional, cl::desc("<input file ...>"), cl::OneOrMore, cl::cat(utf16validateOptions));
++
++// Byte-oriented UTF-16LE validator kernel (first correctness milestone).
++//
++// This is a deliberately simple, stateful, serial implementation: it walks the
++// raw byte stream two bytes at a time, interpreting each pair as a little-endian
++// UTF-16 code unit, and counts ill-formed code units. Correctness is prioritized
++// over performance for this milestone.
++//
++// Persistent state carried across segments:
++//   errAccum     -- running count of errors seen so far
++//   pendingHigh  -- true if the previous code unit was a high surrogate that has
++//                   not yet been matched with a low surrogate
++//
++// TODO (future performance milestone): replace this serial scan with SIMD
++// 16-bit-lane range checks (fwCast(16,...), mvmd_slli/mvmd_dslli for the
++// one-lane neighbour shift), emit a per-position error-marker StreamSet(1),
++// and reduce it with PopcountKernel instead of accumulating a scalar here.
++class UTF16ValidatorKernel final : public MultiBlockKernel {
++public:
++    UTF16ValidatorKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream, Scalar * errorCount);
++private:
++    void generateMultiBlockLogic(KernelBuilder & b, llvm::Value * const numOfStrides) override;
++};
++
++UTF16ValidatorKernel::UTF16ValidatorKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream, Scalar * errorCount)
++: MultiBlockKernel(ts, "utf16validate",
++// input stream: raw bytes (each UTF-16 code unit is two consecutive bytes).
++// Linear() guarantees the accessible bytes are contiguous for a serial walk.
++{Binding{"byteStream", byteStream, FixedRate(1), Linear()}},
++// output streams: none for this milestone.
++{},
++// input scalars
++{},
++// output scalars
++{Binding{"errorCount", errorCount}},
++// internal (persistent) scalars carried across segments
++{InternalScalar{ts.getSizeTy(), "errAccum"},
++ InternalScalar{ts.getInt1Ty(), "pendingHigh"}}) {
++
++}
++
++void UTF16ValidatorKernel::generateMultiBlockLogic(KernelBuilder & b, llvm::Value * const /* numOfStrides */) {
++    Type * const sizeTy = b.getSizeTy();
++    Type * const i1Ty = b.getInt1Ty();
++    Type * const i16Ty = b.getInt16Ty();
++    Value * const ZERO = b.getSize(0);
++    Value * const ONE = b.getSize(1);
++    Value * const sz_ZERO = ZERO;
++    Value * const sz_ONE = ONE;
++
++    // Load persistent state.
++    Value * const errIn = b.getScalarField("errAccum");
++    Value * const pendIn = b.getScalarField("pendingHigh");
++
++    // Bytes available this invocation, and a code-unit-typed pointer to them.
++    Value * const processed = b.getProcessedItemCount("byteStream");
++    Value * const avail = b.getAccessibleItemCount("byteStream");
++    Value * const numUnits = b.CreateLShr(avail, ONE);            // avail / 2 complete code units
++    Value * const oddByte = b.CreateAnd(avail, ONE);              // 1 iff a single trailing byte
++    Value * const i8base = b.getRawInputPointer("byteStream", processed);
++    Value * const u16base = b.CreatePointerCast(i8base, i16Ty->getPointerTo());
++
++    BasicBlock * const entry = b.GetInsertBlock();
++    BasicBlock * const loop = b.CreateBasicBlock("scanUnits");
++    BasicBlock * const done = b.CreateBasicBlock("scanDone");
++    b.CreateCondBr(b.CreateICmpNE(numUnits, ZERO), loop, done);
++
++    // Serial scan over the complete code units of this segment.
++    b.SetInsertPoint(loop);
++    PHINode * const idx = b.CreatePHI(sizeTy, 2);
++    PHINode * const err = b.CreatePHI(sizeTy, 2);
++    PHINode * const pend = b.CreatePHI(i1Ty, 2);
++    idx->addIncoming(ZERO, entry);
++    err->addIncoming(errIn, entry);
++    pend->addIncoming(pendIn, entry);
++
++    Value * const unit = b.CreateLoad(i16Ty, b.CreateGEP(i16Ty, u16base, idx));
++    Value * const isHigh = b.CreateAnd(b.CreateICmpUGE(unit, b.getInt16(0xD800)),
++                                       b.CreateICmpULE(unit, b.getInt16(0xDBFF)));
++    Value * const isLow  = b.CreateAnd(b.CreateICmpUGE(unit, b.getInt16(0xDC00)),
++                                       b.CreateICmpULE(unit, b.getInt16(0xDFFF)));
++
++    // Branch-free surrogate state machine:
++    //   errAdd  = isLow ? (pend ? 0 : 1)   // low is valid only right after a high
++    //                   : (pend ? 1 : 0)   // a pending high not followed by a low is unmatched
++    //   newPend = isHigh                   // any high awaits a low; anything else clears the pending flag
++    Value * const errAdd = b.CreateSelect(isLow,
++                                          b.CreateSelect(pend, sz_ZERO, sz_ONE),
++                                          b.CreateSelect(pend, sz_ONE, sz_ZERO));
++    Value * const errNext = b.CreateAdd(err, errAdd);
++    Value * const pendNext = isHigh;
++
++    Value * const nextIdx = b.CreateAdd(idx, ONE);
++    idx->addIncoming(nextIdx, loop);
++    err->addIncoming(errNext, loop);
++    pend->addIncoming(pendNext, loop);
++    b.CreateCondBr(b.CreateICmpNE(nextIdx, numUnits), loop, done);
++
++    b.SetInsertPoint(done);
++    PHINode * const errFinal = b.CreatePHI(sizeTy, 2);
++    PHINode * const pendFinal = b.CreatePHI(i1Ty, 2);
++    errFinal->addIncoming(errIn, entry);
++    errFinal->addIncoming(errNext, loop);
++    pendFinal->addIncoming(pendIn, entry);
++    pendFinal->addIncoming(pendNext, loop);
++
++    // End-of-file finalization (only on the final segment):
++    //   - a still-pending high surrogate is unmatched -> one error
++    //   - a single trailing byte is an incomplete code unit -> one error
++    Value * const atEOF = b.isFinal();
++    Value * const danglingHigh = b.CreateAnd(atEOF, pendFinal);
++    Value * const oddTrailing = b.CreateAnd(atEOF, b.CreateICmpNE(oddByte, ZERO));
++    Value * errTotal = b.CreateAdd(errFinal, b.CreateZExt(danglingHigh, sizeTy));
++    errTotal = b.CreateAdd(errTotal, b.CreateZExt(oddTrailing, sizeTy));
++
++    // Once finalized, clear the pending flag so it is not re-counted.
++    Value * const pendStore = b.CreateSelect(atEOF, b.getInt1(false), pendFinal);
++
++    b.setScalarField("errAccum", errTotal);
++    b.setScalarField("pendingHigh", pendStore);
++    b.setScalarField("errorCount", errTotal);
++}
++
++typedef uint64_t (*utf16validateFunctionType)(const uint32_t fd);
++
++utf16validateFunctionType utf16validatePipelineGen(CPUDriver & driver) {
++    auto P = CreatePipeline(driver, Input<uint32_t>{"fd"}, Output<uint64_t>{"errorCount"});
++    Scalar * const fileDescriptor = P.getInputScalar("fd");
++    StreamSet * const ByteStream = P.CreateStreamSet(1, 8);
++    P.CreateKernelCall<ReadSourceKernel>(fileDescriptor, ByteStream);
++    P.CreateKernelCall<UTF16ValidatorKernel>(ByteStream, P.getOutputScalar("errorCount"));
++    return reinterpret_cast<utf16validateFunctionType>(P.compile());
++}
++
++void utf16validate(utf16validateFunctionType fn_ptr, const std::string & fileName) {
++    const int fd = open(fileName.c_str(), O_RDONLY);
++    if (LLVM_UNLIKELY(fd == -1)) {
++        std::cerr << "Error: cannot open " << fileName << " for processing. Skipped.\n";
++        return;
++    }
++    const uint64_t errorCount = fn_ptr(fd);
++    close(fd);
++    std::cout << fileName << ": errorCount = " << errorCount << "\n";
++}
++
++int main(int argc, char *argv[]) {
++    codegen::ParseCommandLineOptions(argc, argv, {&utf16validateOptions, codegen::codegen_flags()});
++
++    CPUDriver driver("utf16validate");
++    auto fn_ptr = utf16validatePipelineGen(driver);
++    for (unsigned i = 0; i != inputFiles.size(); ++i) {
++        utf16validate(fn_ptr, inputFiles[i]);
++    }
++    return 0;
++}
