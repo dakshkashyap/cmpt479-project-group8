@@ -35,6 +35,20 @@ PATCH="$REPO_ROOT/$PATCH_REL"
 err()  { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
 
+# Return 0 when $1 can compile and link a trivial C++ program.
+compiler_can_link() {
+    local tmp prog
+    tmp="$(mktemp -d)"
+    prog="$tmp/t"
+    echo 'int main(){return 0;}' > "$tmp/t.cc"
+    if "$1" "$tmp/t.cc" -o "$prog" 2>/dev/null; then
+        rm -rf "$tmp"
+        return 0
+    fi
+    rm -rf "$tmp"
+    return 1
+}
+
 # --- Required programs ---
 for tool in git cmake c++ python3; do
     command -v "$tool" >/dev/null 2>&1 \
@@ -42,9 +56,10 @@ for tool in git cmake c++ python3; do
 done
 [ -f "$PATCH" ] || err "Milestone patch not found: $PATCH"
 
-# --- Locate LLVM 16 ---
+# --- Locate LLVM (prefer 16; fall back to newer distro packages on Linux) ---
 LLVM_DIR_RESOLVED=""
 LLVM_PREFIX=""
+LLVM_VERSION=""
 if [ -n "${LLVM_DIR:-}" ]; then
     LLVM_DIR_RESOLVED="$LLVM_DIR"
     LLVM_PREFIX="$(cd "$LLVM_DIR/../../.." 2>/dev/null && pwd || true)"
@@ -55,21 +70,32 @@ elif [ -n "${LLVM_CONFIG:-}" ]; then
 elif command -v brew >/dev/null 2>&1 && brew --prefix llvm@16 >/dev/null 2>&1; then
     LLVM_PREFIX="$(brew --prefix llvm@16)"
     LLVM_DIR_RESOLVED="$LLVM_PREFIX/lib/cmake/llvm"
-elif command -v llvm-config-16 >/dev/null 2>&1; then
-    LLVM_DIR_RESOLVED="$(llvm-config-16 --cmakedir)"
-    LLVM_PREFIX="$(llvm-config-16 --prefix)"
+    LLVM_VERSION="16"
 else
-    err "Could not locate LLVM 16.
+    for ver in 16 18 19 20; do
+        if command -v "llvm-config-${ver}" >/dev/null 2>&1; then
+            LLVM_DIR_RESOLVED="$(llvm-config-${ver} --cmakedir)"
+            LLVM_PREFIX="$(llvm-config-${ver} --prefix)"
+            LLVM_VERSION="$ver"
+            break
+        fi
+    done
+fi
+[ -n "$LLVM_DIR_RESOLVED" ] \
+    || err "Could not locate LLVM (need 16+, or set LLVM_DIR / LLVM_CONFIG).
   macOS : brew install llvm@16
   Linux : install llvm-16-dev / clang-16 (provides llvm-config-16)
   Or set one of:
     LLVM_DIR=/path/to/llvm/lib/cmake/llvm
     LLVM_CONFIG=/path/to/llvm-config"
-fi
 [ -f "$LLVM_DIR_RESOLVED/LLVMConfig.cmake" ] \
     || err "LLVMConfig.cmake not found under '$LLVM_DIR_RESOLVED'.
   Set LLVM_DIR to the directory that contains LLVMConfig.cmake."
-info "LLVM 16 cmake dir: $LLVM_DIR_RESOLVED"
+if [ -n "$LLVM_VERSION" ] && [ "$LLVM_VERSION" != "16" ]; then
+    info "LLVM ${LLVM_VERSION} cmake dir: $LLVM_DIR_RESOLVED (16 preferred; using newer system LLVM)"
+else
+    info "LLVM cmake dir: $LLVM_DIR_RESOLVED"
+fi
 
 # --- Clone / reuse the Parabix checkout ---
 if [ ! -d "$PARABIX_DIR/.git" ]; then
@@ -116,19 +142,30 @@ BUILD_DIR="$PARABIX_DIR/build"
 CMAKE_ARGS=(-S "$PARABIX_DIR" -B "$BUILD_DIR"
             -DCMAKE_BUILD_TYPE=Release
             -DLLVM_DIR="$LLVM_DIR_RESOLVED")
-# Prefer the LLVM 16 toolchain's clang++/clang (the known-good compiler for this base).
+# Prefer the LLVM toolchain's clang++/clang (known-good for LLVM 16). On some Linux
+# hosts (e.g. CSIL) distro clang++ cannot link against libstdc++; fall back to g++.
+CXX_COMPILER=""
+C_COMPILER=""
 if [ -n "$LLVM_PREFIX" ] && [ -x "$LLVM_PREFIX/bin/clang++" ]; then
-    CMAKE_ARGS+=(-DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++"
-                 -DCMAKE_C_COMPILER="$LLVM_PREFIX/bin/clang")
-    info "Using compiler: $LLVM_PREFIX/bin/clang++"
-else
-    info "Using default system c++ (LLVM toolchain clang++ not found under prefix)."
+    if compiler_can_link "$LLVM_PREFIX/bin/clang++"; then
+        CXX_COMPILER="$LLVM_PREFIX/bin/clang++"
+        C_COMPILER="$LLVM_PREFIX/bin/clang"
+        info "Using compiler: $CXX_COMPILER"
+    else
+        info "LLVM clang++ cannot link on this host; falling back to system c++."
+    fi
 fi
+if [ -z "$CXX_COMPILER" ]; then
+    CXX_COMPILER="$(command -v c++)"
+    C_COMPILER="$(command -v cc)"
+    info "Using compiler: $CXX_COMPILER"
+fi
+CMAKE_ARGS+=(-DCMAKE_CXX_COMPILER="$CXX_COMPILER" -DCMAKE_C_COMPILER="$C_COMPILER")
 
 info "Configuring Release build in $BUILD_DIR"
 if ! cmake "${CMAKE_ARGS[@]}"; then
     err "CMake configuration failed.
-  Common causes: Boost not installed (macOS: brew install boost) or LLVM 16 mismatch.
+  Common causes: Boost not installed (macOS: brew install boost) or LLVM version mismatch.
   See the CMake output above."
 fi
 
