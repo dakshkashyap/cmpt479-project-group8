@@ -14,7 +14,11 @@ out/
 *.so
 *.out
 
-# Benchmark output
+# Benchmark datasets (generated locally; may be large)
+benchmarks/data/
+
+# Benchmark output (raw CSV/JSON/TXT are generated; small Markdown summaries
+# under results/ are intentionally NOT ignored so a verified summary can be committed)
 results/*.csv
 results/*.json
 results/*.txt
@@ -33,7 +37,6 @@ __pycache__/
 *.orig
 *.rej
 *~
-
 
 # Temporary files
 *.tmp
