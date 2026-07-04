@@ -1,18 +1,39 @@
+# Local Parabix checkout (created by scripts/setup_parabix.sh; never committed)
+.deps/
+
 # Build output
 build/
+**/build/
 cmake-build-*/
 out/
+
+# Compiled objects / libraries / binaries
+*.o
+*.a
+*.dylib
+*.so
+*.out
 
 # Benchmark output
 results/*.csv
 results/*.json
 results/*.txt
 
+# Python
+__pycache__/
+*.pyc
+
 # macOS
 .DS_Store
 
 # Editor files
 .vscode/
+
+# Patch / merge / backup leftovers
+*.orig
+*.rej
+*~
+
 
 # Temporary files
 *.tmp
