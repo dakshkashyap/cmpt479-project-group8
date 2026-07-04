@@ -12,7 +12,7 @@ Build and evaluate a UTF-16LE well-formedness validator on top of the
 - **Malformed surrogate-pair counting**: the tool reports the number of
   ill-formed UTF-16 code units (unpaired high/low surrogates, incomplete final
   unit).
-- Planned **single-thread vs. multi-thread** comparison using Parabix's
+- A preliminary **single-thread vs. multi-thread** benchmark using Parabix's
   `--thread-num` control.
 - Planned comparison against the **Clausecker–Lemire** UTF-16 validation approach.
 
@@ -28,8 +28,8 @@ Only verified results are listed here:
   surrogate pairs and malformed sequences crossing a SIMD block boundary, odd
   trailing byte after a large input).
 - Forced segment-size tests (`-segment-size=1,13,64`) pass.
-- **Benchmarking is not yet complete** (single- vs multi-thread and
-  Clausecker–Lemire comparisons are pending).
+- A reproducible preliminary scalar/SIMD/thread-count benchmark is available.
+- The full performance evaluation and Clausecker–Lemire comparison are still pending.
 
 ## Repository layout
 
@@ -113,6 +113,50 @@ Parabix's threading is controlled per run (no measured speedups are claimed yet)
 .deps/parabix/build/bin/utf16validate --simd --thread-num=3 file.bin
 ```
 
+## Preliminary benchmarking
+
+A reproducible preliminary benchmark compares the **scalar** validator, the
+**SIMD** validator (plain `--simd`, i.e. Parabix default threading), and the SIMD
+validator at several explicit thread counts (`--simd --thread-num=N`). The
+Clausecker–Lemire comparison is **not** included yet; it is planned for a later
+project update.
+
+The workflow runs the correctness suite first, then generates deterministic valid
+UTF-16LE datasets, then benchmarks each configuration:
+
+- Dataset sizes: 1, 8, 32, and 64 MiB (all valid input; every run must report
+  `errorCount = 0`).
+- Each configuration does a few warmup runs followed by measured repetitions
+  (defaults: 2 warmups, 7 repetitions). Warmups populate Parabix's on-disk
+  object cache so measured runs load the compiled pipeline rather than
+  recompiling it.
+- Wall-clock time is measured per run; **throughput (MiB/s)** is computed from the
+  **median** time, and **speedup** is the scalar median time divided by the
+  configuration's median time.
+
+Run the full benchmark:
+
+```
+./scripts/benchmark_utf16validate.sh
+```
+
+Run a shorter development benchmark:
+
+```
+BENCH_SIZES_MB=1,8 \
+BENCH_WARMUPS=1 \
+BENCH_REPETITIONS=3 \
+./scripts/benchmark_utf16validate.sh
+```
+
+Outputs:
+
+- Raw per-configuration data: `results/utf16_benchmark.csv` (git-ignored)
+- Human-readable summary: `results/utf16_benchmark_summary.md`
+
+Results are **machine-specific and preliminary**; no speedup is claimed here.
+Numbers should be read from a generated summary on the machine that produced them.
+
 ## Reproducibility details
 
 - **Parabix remote:** `https://cs-git-research.cs.sfu.ca/cameron/parabix-devel.git`
@@ -132,4 +176,5 @@ Parabix's threading is controlled per run (no measured speedups are claimed yet)
   The SIMD mismatch bits are used only for counting.
 - The **final remainder** (fewer than one SIMD block of code units) is handled by
   scalar processing.
-- **Performance benchmarking is still pending.**
+- Preliminary benchmarking is available, but the final performance evaluation and
+  Clausecker–Lemire comparison are still pending.
