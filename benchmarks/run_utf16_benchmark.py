@@ -149,14 +149,20 @@ def grep_constant(path, key):
 
 
 def expected_error_count(bin_path):
-    """Expected count from the generator's sidecar; valid files default to 0."""
+    """Expected count from the generator's sidecar; valid files default to 0.
+
+    Sidecars written before the malformed generator existed have no
+    expected_error_count key, so fall back to 0 for a `valid_` dataset.
+    """
     side = bin_path + ".json"
     if os.path.isfile(side):
         with open(side) as handle:
-            return int(json.load(handle)["expected_error_count"])
+            meta = json.load(handle)
+        if "expected_error_count" in meta:
+            return int(meta["expected_error_count"])
     if os.path.basename(bin_path).startswith("valid_"):
         return 0
-    raise SystemExit("ERROR: no metadata sidecar for %s (regenerate the dataset)" % bin_path)
+    raise SystemExit("ERROR: no expected_error_count for %s (regenerate the dataset)" % bin_path)
 
 
 # --- running -------------------------------------------------------------------
