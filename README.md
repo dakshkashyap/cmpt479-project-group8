@@ -342,6 +342,33 @@ Files are named
 and a description of the injected errors. A *site* is one malformed construct, so the
 site count is not the error count (a reversed pair is one site but two errors).
 
+## Clausecker–Lemire baseline
+
+The external, specialized SIMD baseline is [simdutf](https://github.com/simdutf/simdutf)
+(pinned at `v9.0.0`, commit `ca7acbce`; Apache-2.0 OR MIT). On arm64 it selects the
+NEON kernel that classifies surrogates from the **high byte** — the same strategy as our
+byte-oriented Parabix kernel, so it is a like-for-like competitor.
+
+No upstream source is vendored: the setup script clones the pinned commit into
+`.deps/simdutf/` (git-ignored) and builds a wrapper we own. See
+[`external/baselines/clausecker_lemire/README.md`](external/baselines/clausecker_lemire/README.md)
+for attribution, licensing, and the full output-semantics discussion.
+
+```bash
+./scripts/setup_clausecker_lemire.sh                       # fetch + build the baseline
+
+BIN=.deps/baselines/bin/utf16validate_cl
+$BIN --impl                                                # which SIMD kernel was selected
+$BIN benchmarks/data/valid_utf16le_1MiB.bin                # -> valid = true
+```
+
+**Output semantics differ, by design.** Our validators report `errorCount = N` (how many
+code units are ill-formed); simdutf reports `valid = true/false` plus the index of the
+**first** ill-formed unit — it does not count every error, and the wrapper never
+fabricates a count. The fair comparison is therefore **accept/reject throughput on valid
+input**, where both tools do the same work. **No performance comparison has been run
+yet**; no speed numbers are claimed.
+
 ## Reproducibility details
 
 - **Parabix remote:** `https://cs-git-research.cs.sfu.ca/cameron/parabix-devel.git`
