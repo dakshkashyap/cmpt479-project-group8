@@ -41,10 +41,10 @@ index 00000000..9cd58967
 +)
 diff --git a/tools/utf16validate/utf16validate.cpp b/tools/utf16validate/utf16validate.cpp
 new file mode 100644
-index 00000000..01406688
+index 00000000..53b7bb90
 --- /dev/null
 +++ b/tools/utf16validate/utf16validate.cpp
-@@ -0,0 +1,442 @@
+@@ -0,0 +1,445 @@
 +/*
 + *  Part of the Parabix Project, under the Open Software License 3.0.
 + *  SPDX-License-Identifier: OSL-3.0
@@ -99,10 +99,13 @@ index 00000000..01406688
 +//   pendingHigh  -- true if the previous code unit was a high surrogate that has
 +//                   not yet been matched with a low surrogate
 +//
-+// TODO (future performance milestone): replace this serial scan with SIMD
-+// 16-bit-lane range checks (fwCast(16,...), mvmd_slli/mvmd_dslli for the
-+// one-lane neighbour shift), emit a per-position error-marker StreamSet(1),
-+// and reduce it with PopcountKernel instead of accumulating a scalar here.
++// The performance path is UTF16ValidatorSIMDKernel (below), which classifies
++// surrogates byte-by-byte at fw=8 on the high byte of each code unit and is
++// therefore independent of host lane order. This scalar kernel is deliberately
++// kept as the differential oracle for it and is not the portable path: it forms
++// each code unit with a host-order 16-bit load, which is correct for the
++// UTF-16LE target on the little-endian hosts we build on.
++// See docs/SIMD_BYTE_ORIENTED_VALIDATOR.md for the byte-oriented design.
 +class UTF16ValidatorKernel final : public MultiBlockKernel {
 +public:
 +    UTF16ValidatorKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream, Scalar * errorCount);

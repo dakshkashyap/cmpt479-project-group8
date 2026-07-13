@@ -90,6 +90,43 @@ pipeline segment sizes (1, 13, 64) that stress the cross-segment carry, and
 randomized inputs checked against a Python reference. Both paths also agree under
 `--thread-num=1` and the default (3) thread count.
 
+## Issue #20 audit — byte-oriented / portability verification
+
+Audited against `patches/utf16-simd-milestone.patch`, which is the tracked source
+of truth for the kernel (`.deps/parabix/` is a git-ignored checkout that setup
+regenerates from the patch, so it can lag behind and must not be audited on its
+own).
+
+| Check | Result | Evidence in the kernel |
+|-------|--------|------------------------|
+| Surrogate classification is byte-level | Confirmed | `fwCast(8, pack)`, `simd_and(bytes, simd_fill(8, 0xFC))`, `simd_eq(8, …)` — bytes are never reassembled into 16-bit lanes |
+| High surrogate detected from `0xD8–0xDB` | Confirmed | `(highByte & 0xFC) == 0xD8`, via `simd_fill(8, 0xD8)` |
+| Low surrogate detected from `0xDC–0xDF` | Confirmed | `(highByte & 0xFC) == 0xDC`, via `simd_fill(8, 0xDC)` |
+| No AVX/SSE/NEON intrinsics used directly | Confirmed | No `_mm*`, `__m128`/`__m256`, `immintrin.h` or `arm_neon.h`; every vector op goes through Parabix/IDISA. The one "NEON" occurrence is prose in a comment |
+| No host-endian 16-bit lane assumption | Confirmed | No `fwCast(16, …)`, `simd_eq(16, …)`, `hsimd_signmask(16, …)` or `0xFC00` remain, and the former little-endian-host `static_assert` is gone |
+| Boundary state handled across blocks/segments | Confirmed | 1-bit `pendingHigh` internal scalar → `carryInit` → per-pack `carryPhi` → `carryFinal` → `setScalarField`; EOF finalisation via `isFinal()` |
+| Existing tests still pass | Confirmed | `./scripts/test_utf16validate.sh` → **31 passed, 0 failed**, after rebuilding from the current patch |
+
+### Why the SIMD path is portable
+
+The high byte alone decides the class, and it is selected by **memory position**
+(byte `2k+1` of code unit `k` for UTF-16LE) rather than by host lane significance.
+All comparisons run at `fw=8` on raw bytes through the Parabix/IDISA layer, so the
+kernel never depends on how a given host would assemble a byte pair into a 16-bit
+integer, and it contains no architecture-specific intrinsics: Parabix lowers the
+same source to whatever SIMD width the target provides.
+
+### Known limitations (unchanged by this audit)
+
+- The current target is **UTF-16LE only**.
+- The scalar `UTF16ValidatorKernel` is the differential **oracle**, not the portable
+  path: it still forms each code unit with a host-order 16-bit load, which is
+  correct for UTF-16LE on the little-endian hosts we build on. The SIMD path makes
+  no such assumption.
+- **UTF-16BE remains future work**, not current support. The high byte would move to
+  the even byte positions, so the high-byte position mask and the scalar-tail offset
+  change; the pairing logic and the carry mechanism stay as they are.
+
 ## References
 
 - `patches/utf16-simd-milestone.patch` — the applied kernel.
