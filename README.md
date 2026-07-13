@@ -259,6 +259,13 @@ Outputs:
 Results are **machine-specific and preliminary**; no speedup is claimed here.
 Numbers should be read from a generated summary on the machine that produced them.
 
+Before collecting or quoting any performance number, read
+[`docs/benchmark_methodology.md`](docs/benchmark_methodology.md). It defines the
+benchmark modes, the fair comparison groups (in particular: the Clausecker–Lemire
+baseline is single-threaded, so it may only be compared against Parabix
+`--thread-num=1`, on valid input), the startup/JIT distortion that makes small-input
+throughput misleading, and the CSV/summary schema the comparison harness must produce.
+
 ### Benchmark datasets
 
 `benchmarks/generate_utf16_benchmark.py` produces deterministic, valid UTF-16LE
