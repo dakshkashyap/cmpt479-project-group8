@@ -236,20 +236,49 @@ UTF-16LE datasets, then benchmarks each configuration:
   **median** time, and **speedup** is the scalar median time divided by the
   configuration's median time.
 
-Run the full benchmark:
+The harness runs the full matrix — `scalar`, Parabix SIMD at `--thread-num=1/2/3` and
+default threads, and (optionally) the Clausecker–Lemire/simdutf baseline — and records
+enough metadata to analyse it fairly (see `docs/benchmark_methodology.md`).
+
+Smoke test (fast; checks the harness without a long run, writes to a temp dir so it
+cannot touch committed results):
 
 ```
+BENCH_SMOKE=1 ./scripts/benchmark_utf16validate.sh
+```
+
+Run the benchmark, including the simdutf baseline:
+
+```
+BENCH_INCLUDE_SIMDUTF=1 ./scripts/benchmark_utf16validate.sh
+```
+
+Run the final matrix over the large sizes and every dataset:
+
+```
+BENCH_DATASETS=all \
+BENCH_SIZES_MB=128,256,512 \
+BENCH_INCLUDE_SIMDUTF=1 \
 ./scripts/benchmark_utf16validate.sh
 ```
 
-Run a shorter development benchmark:
+Or drive the harness directly:
 
 ```
-BENCH_SIZES_MB=1,8 \
-BENCH_WARMUPS=1 \
-BENCH_REPETITIONS=3 \
-./scripts/benchmark_utf16validate.sh
+python3 benchmarks/run_utf16_benchmark.py \
+    --datasets mixed_multilingual --sizes-mb 1 \
+    --warmups 1 --repetitions 2 --include-simdutf \
+    --output /tmp/smoke.csv
 ```
+
+Every timed run is checked against the dataset's expected result; a run reporting the
+wrong answer is marked `result_ok=false` and is never used as a speedup baseline. The
+harness also measures each tool's **fixed per-process overhead** on a tiny input and
+reports an overhead-adjusted throughput next to the raw one — Parabix pays pipeline-load
+cost that simdutf does not, so raw small-input throughput is not a fair comparison.
+
+A non-smoke run overwrites `results/<label>_summary.md` (a tracked file). Use
+`BENCH_RESULTS_DIR=/tmp/...` or `BENCH_SMOKE=1` if you do not intend to update it.
 
 Outputs:
 
