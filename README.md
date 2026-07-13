@@ -295,6 +295,53 @@ lives in `benchmarks/data/` and is git-ignored.
 The benchmark runner currently measures the `default` dataset; wiring the
 multilingual datasets into the timed runs is tracked separately.
 
+### Malformed datasets with controlled error rates
+
+Adding `--error-patterns` corrupts any dataset above at a controlled error rate.
+Invalid surrogate sequences are patched directly into the raw UTF-16LE bytes
+(Python's codecs will not encode a lone surrogate), and the **expected error count is
+recomputed from the final bytes** by an independent reference validator inside the
+generator — so the metadata cannot disagree with what a validator will report.
+
+| Error pattern | Injected construct |
+| --- | --- |
+| `unpaired_high` | lone high surrogates (1 error each) |
+| `unpaired_low` | lone low surrogates (1 error each) |
+| `reversed_pair` | a low surrogate followed by a high surrogate (2 errors each) |
+| `odd_trailing_byte` | lone high surrogates, plus the final byte removed so the file ends in an incomplete code unit (+1 error) |
+| `random_mix` | the three constructs above, randomly distributed |
+| `clustered_mix` | the same mix, concentrated in a few contiguous runs |
+
+Error rates are a percentage of the total code units. The standard sweep is
+`0, 0.0001, 0.001, 0.01, 0.1, 1` (`--error-rates all`). A rate of **0% is the control:
+the file is valid and its expected error count is 0.** Existing surrogate pairs in the
+source text are never overwritten, so an injected error adds a fault rather than
+destroying valid text.
+
+```bash
+# 0.01% randomly distributed errors in multilingual text
+python3 benchmarks/generate_utf16_benchmark.py --datasets mixed_multilingual \
+    --error-patterns random_mix --error-rates 0.01 --sizes-mb 1
+
+# clustered errors at 0.1%
+python3 benchmarks/generate_utf16_benchmark.py --datasets mixed_multilingual \
+    --error-patterns clustered_mix --error-rates 0.1 --sizes-mb 1
+
+# one specific malformed construct
+python3 benchmarks/generate_utf16_benchmark.py --datasets cjk \
+    --error-patterns unpaired_high --error-rates 0.01 --sizes-mb 1
+
+# the full sweep: every pattern at every standard rate
+python3 benchmarks/generate_utf16_benchmark.py --datasets mixed_multilingual \
+    --error-patterns all --error-rates all --sizes-mb 1
+```
+
+Files are named
+`malformed_utf16le_<dataset>_<pattern>_err<rate>_<size>MiB.bin`, and each sidecar adds
+`error_rate_percent`, `error_pattern`, `error_sites_injected`, `expected_error_count`,
+and a description of the injected errors. A *site* is one malformed construct, so the
+site count is not the error count (a reversed pair is one site but two errors).
+
 ## Reproducibility details
 
 - **Parabix remote:** `https://cs-git-research.cs.sfu.ca/cameron/parabix-devel.git`
