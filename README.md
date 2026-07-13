@@ -259,6 +259,42 @@ Outputs:
 Results are **machine-specific and preliminary**; no speedup is claimed here.
 Numbers should be read from a generated summary on the machine that produced them.
 
+### Benchmark datasets
+
+`benchmarks/generate_utf16_benchmark.py` produces deterministic, valid UTF-16LE
+inputs. Text is built from built-in Unicode repertoires — nothing is downloaded and
+no corpus is stored in the repository. Non-BMP characters are encoded as explicit
+surrogate pairs, and a file never ends in a half-written code unit, so every dataset
+validates with `errorCount = 0`.
+
+| Dataset | Composition |
+| --- | --- |
+| `default` | Synthetic mix (ordinary BMP, BMP above U+E000, surrogate pairs). **Used by the benchmark runner**; bytes are unchanged so existing results stay comparable. |
+| `english_ascii_heavy` | ASCII words, capitals and digits; single-unit BMP |
+| `european_accented` | Latin words with Latin-1 Supplement / Latin Extended-A accents |
+| `south_asian` | Devanagari (Hindi) and Gurmukhi (Punjabi) |
+| `cjk` | CJK Han ideographs with Japanese kana and Korean Hangul |
+| `emoji_heavy` | Non-BMP emoji (every character is a surrogate pair) + ASCII |
+| `mixed_multilingual` | A blend of all of the above |
+
+```bash
+# default dataset (what ./scripts/benchmark_utf16validate.sh generates)
+python3 benchmarks/generate_utf16_benchmark.py --sizes-mb 1,8,32,64
+
+# a single multilingual dataset
+python3 benchmarks/generate_utf16_benchmark.py --datasets cjk --sizes-mb 1
+
+# every multilingual dataset at 1 MiB, with a chosen seed
+python3 benchmarks/generate_utf16_benchmark.py --datasets all --sizes-mb 1 --seed 479
+```
+
+Each `.bin` gets a `<file>.bin.json` sidecar recording the dataset type, requested
+and actual size, seed, encoding, and a short composition description. Generated data
+lives in `benchmarks/data/` and is git-ignored.
+
+The benchmark runner currently measures the `default` dataset; wiring the
+multilingual datasets into the timed runs is tracked separately.
+
 ## Reproducibility details
 
 - **Parabix remote:** `https://cs-git-research.cs.sfu.ca/cameron/parabix-devel.git`
