@@ -288,6 +288,12 @@ Outputs:
 Results are **machine-specific and preliminary**; no speedup is claimed here.
 Numbers should be read from a generated summary on the machine that produced them.
 
+Thread scaling is analysed in [`docs/threading_analysis.md`](docs/threading_analysis.md)
+(helper: `benchmarks/analyze_thread_scaling.py`). **Note:** that analysis found that the
+current byte-oriented SIMD kernel is slower than the committed summary reports, so the
+speedup figures in `results/utf16_benchmark_summary.md` are stale — re-measure before
+quoting them.
+
 Before collecting or quoting any performance number, read
 [`docs/benchmark_methodology.md`](docs/benchmark_methodology.md). It defines the
 benchmark modes, the fair comparison groups (in particular: the Clausecker–Lemire
