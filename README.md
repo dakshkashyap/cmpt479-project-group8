@@ -141,14 +141,27 @@ agree, so a bug would have to appear identically in all of them to slip through.
 ```bash
 # rebuild the tool after editing the kernel, then run the suite
 cmake --build .deps/parabix/build --target utf16validate -j"$(nproc)"
-./scripts/test_utf16validate.sh          # expect: "31 passed, 0 failed"
+./scripts/test_utf16validate.sh          # expect: "67 passed, 0 failed"
 ```
 
 The suite runs every fixture in both `scalar` and `--simd` modes and fails on any
-disagreement, crash, or wrong count. It covers fixed cases, block/tail boundaries
-at 128/256/512 units, valid and malformed surrogate pairs crossing a block
-boundary, forced pipeline segment sizes (`-segment-size=1,13,64`, which stress the
-cross-segment carry), and deterministic randomized inputs.
+disagreement, crash, or wrong count. The Python reference validates the raw
+UTF-16LE byte structure directly, so it also covers blobs no string encoder would
+produce (lone surrogates, odd trailing bytes). Grouped coverage:
+
+- **fixed cases** — valid BMP, valid pair, and each malformed class;
+- **multilingual (valid)** — ASCII/English, accented European, Hindi, Punjabi, CJK,
+  emoji (real non-BMP surrogate pairs), and a mixed sample (also run under forced
+  segment sizes);
+- **malformed sequences** — unpaired high/low, reversed pair, odd trailing byte,
+  consecutive malformed units, and malformed data embedded in multilingual text;
+- **boundaries** — valid and malformed pairs on, just before, and just after
+  64-code-unit group boundaries, plus block/tail boundaries at 64/128/256/512 units;
+- **forced pipeline segment sizes** (`-segment-size=1,13,64`) that stress the
+  cross-segment carry, and **deterministic randomized inputs**.
+
+All fixtures are generated into a `mktemp` directory and removed on exit; no test
+data is committed.
 
 Extra confidence beyond the suite:
 
