@@ -44,22 +44,33 @@ Let `BITS` be the SIMD register width (the widest available, e.g. 256/512) and
    isHi8  = (masked == 0xD8)      (simd_eq,  fw=8)   // all-ones per matching byte
    isLo8  = (masked == 0xDC)      (simd_eq,  fw=8)
    ```
-2. **One bit per byte position** via `hsimd_signmask(8, …)`: bit *i* ← byte *i*.
-   For UTF-16LE the high byte of code unit *k* is memory byte `2k+1`, so the
-   high-byte results occupy the **odd** bit positions.
-3. **Pairing check on the high-byte stream.** A stream is well-formed iff every
+2. **Pairing check, entirely in vector registers.** A stream is well-formed iff every
    low surrogate is immediately preceded by a high surrogate, so per code unit
-   `mismatch[k] = isLow[k] XOR isHigh[k-1]`. Advancing the high-surrogate bits by
-   one code unit = two byte positions and injecting the incoming carry at the
-   first predecessor slot gives, for the whole pack:
+   `mismatch[k] = isLow[k] XOR isHigh[k-1]`. "isHigh of the previous code unit" is
+   `isHi8` advanced by one code unit = **two byte lanes**:
    ```
-   shifted = (hiBits << 2) | (carryIn << 1)
-   mism    = (loBits XOR shifted) & ODD_MASK      // ODD_MASK = bits 1,3,…,M-1
-   errors += popcount(mism)
-   carryOut = (hiBits >> (M-1)) & 1               // high-surrogate status of last unit
+   prevHi   = mvmd_dslli(8, isHi8, prevPackHi, 2)   // vector lane shift; pulls the
+                                                    // previous pack's top lanes in
+   mismatch = (isLo8 XOR prevHi) & ODD_ONE_MASK     // 0x01 at odd (high-byte) lanes
+   errors  += bitblock_popcount(mismatch)           // one bit per ill-formed unit
    ```
-4. A single **carry bit** (`carryIn`/`carryOut`) threads the "previous unit was an
-   unmatched high surrogate" state across packs, blocks and segments.
+   `ODD_ONE_MASK` selects the high-byte position of each code unit (memory byte `2k+1`
+   for UTF-16LE) and leaves a **single set bit** there, so one block popcount is exactly
+   the error count.
+3. The **carry is a vector**: the previous pack's `isHi8` mask. `mvmd_dslli` pulls its
+   top lanes into the vacated ones, so the cross-pack "previous unit was an unmatched
+   high surrogate" state needs no scalar bit. It threads across packs, blocks and
+   segments; the incoming `pendingHigh` scalar is injected into the last high-byte lane
+   of the initial carry vector, and the outgoing one is read back with a single
+   `mvmd_extract` **once per invocation** (not once per pack).
+
+> **Performance note (issue #38).** An earlier version of this kernel extracted two
+> scalar bitmasks per pack with `hsimd_signmask(8, …)`. On AArch64 that primitive has no
+> NEON lowering in IDISA and expanded into ~16 lane extractions plus scalar bit assembly
+> *per call*, which dominated the loop and made SIMD slower than scalar. Keeping the
+> whole pairing check in vector registers removed it: ~112 → ~40 instructions per pack,
+> and SIMD went from 0.66× to 1.68× of scalar at 128 MiB. See
+> [`simd_regression_investigation.md`](simd_regression_investigation.md).
 
 The scalar tail (sub-pack remainder) is byte-oriented too: it reads the high byte
 at offset `2*idx+1` directly. EOF finalisation adds one error for a dangling

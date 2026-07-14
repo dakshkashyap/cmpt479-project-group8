@@ -239,7 +239,88 @@ grep -c "umov" /tmp/asm_simd.txt            # lane extracts
 grep -l "hsimd_signmask" .deps/parabix/lib/idisa/*.cpp   # sse + avx + generic only
 ```
 
-## 6. Threats to validity
+## 6. Issue #38 — the fix, and what it bought
+
+Recommendation 1 above was implemented: **`hsimd_signmask(8, …)` was removed from the hot
+loop** and the pairing check now stays entirely in vector registers. No architecture-specific
+intrinsics were added; the kernel is still byte-oriented (`fw=8`) and still classifies on the
+high byte, and the surrogate rules are unchanged.
+
+### What changed
+
+| | Before (issue #37) | After (issue #38) |
+|---|---|---|
+| previous-unit high mask | scalar `i64` bitmask via `hsimd_signmask(8, isHi8)` | the previous pack's `isHi8` **vector**, shifted with `mvmd_dslli(8, …, 2)` |
+| low-surrogate mask | scalar `i64` bitmask via `hsimd_signmask(8, isLo8)` | `isLo8` vector, used directly |
+| mismatch | scalar `(loBits XOR shifted) & ODD_MASK` | `simd_and(simd_xor(isLo8, prevHi), ODD_ONE_MASK)` |
+| counting | scalar `popcount` of the `i64` mask | one `bitblock_popcount` of the mismatch vector |
+| cross-pack carry | scalar carry bit | carried in the vector; `mvmd_extract` **once per invocation** |
+
+`ODD_ONE_MASK` leaves a single set bit (`0x01`) at each high-byte lane rather than a full
+`0xFF`, so a single block popcount *is* the error count.
+
+### Generated assembly (same `--ShowASM` method as §2)
+
+| | issue #37 | issue #38 |
+|---|---|---|
+| `umov` (vector→scalar lane extracts) | **32 per pack** | **1 in the entire dump** |
+| `bfi` (scalar bit assembly) | 10+ per pack | **0** |
+| `ext` (vector lane shift) | 0 | 1 (the `mvmd_dslli`) |
+| `cmeq.16b` (real SIMD compares) | 2 | 2 |
+| **instructions per pack** | **~112** | **~40** |
+
+### Measured result
+
+`--datasets default --sizes-mb 32,64,128 --warmups 2 --repetitions 5`
+
+| Mode | 32 MiB | 64 MiB | 128 MiB |
+|---|---|---|---|
+| `scalar` (#37 → #38) | 999.2 → 993.9 | 1412.6 → 1408.5 | 1747.5 → 1778.5 |
+| `parabix_simd_t1` | 765.1 → **1285.4** (+68%) | 988.0 → **2084.9** (+111%) | 1150.0 → **2991.0** (+160%) |
+| `parabix_simd_default` | 794.1 → **1404.5** (+77%) | 1007.3 → **2431.7** (+141%) | 1180.8 → **3780.7** (+220%) |
+
+**The scalar control is unchanged** (within ±2%), which is what makes this a real kernel
+improvement rather than measurement drift.
+
+**SIMD now beats scalar**, having been 0.66× before:
+
+| | 32 MiB | 64 MiB | 128 MiB |
+|---|---|---|---|
+| `simd_t1` / `scalar`, raw | 1.29× | 1.48× | **1.68×** |
+| `simd_t1` / `scalar`, overhead-adjusted | 2.25× | 2.27× | **2.23×** |
+
+The overhead-adjusted ratio is flat at ~2.25×, which is the honest per-byte speedup; the raw
+figure is lower only because the fixed ~0.019 s startup is still amortized over the input.
+
+Thread scaling also improved as a side effect: `t2` now gives ~1.29× over `t1` at 128 MiB
+(3846 vs 2991 MiB/s), where issue #27 measured a flat ~1.08× ceiling. That is consistent with
+the loop no longer being dominated by a serial scalar dependency chain — but it was not the
+target of this issue and has not been re-analysed properly.
+
+**Correctness: 67/67 tests pass**, including the cross-pack/block/segment carry cases and the
+forced segment sizes that specifically stress it.
+
+### Status
+
+**Improved.** `hsimd_signmask(8, …)` is **fully removed** from the kernel (only comments
+mention it). The remaining bottleneck is no longer mask extraction.
+
+Remaining known costs, in rough order:
+
+- the **fixed ~0.019 s per-process startup**, which still caps raw throughput at small inputs;
+- one `bitblock_popcount` per pack (a few instructions: horizontal reduce + one `fmov`) — it
+  could be deferred by accumulating mismatch bytes in a vector and reducing once per block,
+  though that needs an overflow-safe flush every ≤255 packs;
+- the still-scalar tail and EOF handling (negligible at these sizes).
+
+The original conclusion of §3 stands and is now confirmed constructively: **IDISA has no
+AArch64 lowering for `hsimd_signmask`**, and kernels written as if it were a one-instruction
+`pmovmskb` will be pathologically slow on ARM. The portable fix is to avoid the primitive, not
+to add intrinsics.
+
+---
+
+## 7. Threats to validity
 
 - **One machine, one architecture** (arm64 macOS laptop). The central claim — that
   `hsimd_signmask` is unimplemented for NEON and lowers to lane extraction — is a property
