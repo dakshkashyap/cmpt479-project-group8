@@ -288,10 +288,27 @@ Outputs:
 Results are **machine-specific and preliminary**; no speedup is claimed here.
 Numbers should be read from a generated summary on the machine that produced them.
 
+## Error location (LLmask / two-level scan) — design and prototype
+
 A design study for future error-location and repair work — mapping Parabix's existing
 `TwoLevelScanKernel` (LLmask / maskHL sparse scanning) onto UTF-16 — is in
 [`docs/two_level_scan_design.md`](docs/two_level_scan_design.md). It is a **design
-artifact only**: no LLmask generator, scan kernel, or repair is implemented.
+artifact only**: no scan kernel and no repair is implemented.
+
+Its central open question — *how do we reduce the SIMD validator's per-code-unit verdict to a
+bitstream without reintroducing the `hsimd_signmask(8)` regression?* — is prototyped and
+measured in [`docs/llmask_generation_prototype.md`](docs/llmask_generation_prototype.md):
+
+```bash
+./scripts/run_llmask_prototype.sh     # self-test, differential vs a Python reference,
+                                      # cross-check vs the validator, and a benchmark
+```
+
+This compares four LLmask generation strategies (`benchmarks/prototype_llmask_generation.cpp`,
+checked against `benchmarks/llmask_reference.py`). It is a **standalone prototype**: it is not a
+Parabix kernel, the validator is unchanged, and there is no maskHL aggregation and no repair.
+Its throughput figures are microbenchmarks on an in-memory buffer and are **not** comparable to
+the end-to-end validator numbers below.
 
 Thread scaling is analysed in [`docs/threading_analysis.md`](docs/threading_analysis.md)
 (helper: `benchmarks/analyze_thread_scaling.py`). **Note:** that analysis found that the
