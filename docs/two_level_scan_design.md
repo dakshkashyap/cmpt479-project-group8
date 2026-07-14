@@ -338,6 +338,17 @@ grep -rn "CreateCountForwardZeroes\|CreateResetLowestBit" .deps/parabix/include/
    16), so the trap does **not** extend to this level; and the two levels **degrade at different
    rates** — with scattered errors at 0.1% the region skip collapses to 1.6% while 93.8% of
    LLmasks are still clean, so level 2 keeps paying off well after level 1 has stopped.
+1c. ~~**Scan the two-level structure for error positions**~~ — **done in issue #31**; see
+   [`error_position_scan_prototype.md`](error_position_scan_prototype.md). The §6 pseudocode
+   below is now implemented as a prototype (still **no Parabix kernel, no repair**) and emits
+   exact, strictly ascending code-unit positions, verified against a Python reference that
+   never builds a mask and against the production validator's error count (2208 and 22351
+   positions on 32 MiB malformed files, both exact). Outcome: **the consumer side is
+   effectively free.** On valid 32 MiB the two-level scan costs **0.0013 ms** against **~2.95
+   ms** of mask generation — about **0.04%** of the work. It is **65× faster than a one-level
+   scan** on clean data (it reads 32 KiB of maskHL instead of 2 MiB of LLmasks), and ~4200×
+   faster than testing every bit. **The remaining risk is entirely on the producer side**: the
+   cost of this design is building the mask stream, not scanning it.
 2. Emit the `errorMarks` bitstream from the validator (behind a flag, so the count-only fast path
    is preserved and benchmarks stay comparable).
 3. Subclass `TwoLevelScanKernel` to *locate* errors (report positions only — still no repair).
