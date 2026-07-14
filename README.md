@@ -316,11 +316,21 @@ region can be skipped with a single compare — is prototyped and measured in
                                       # skip-rate sweep, and an aggregation-cost benchmark
 ```
 
-Both are **standalone prototypes**: they are not Parabix kernels, the production validator is
-unchanged, and there is **no `TwoLevelScanKernel` subclass and no repair**. Their throughput
+The consumer — scanning maskHL and the LLmasks with `ctz` / reset-lowest-bit to recover the
+**exact code-unit position** of every ill-formed unit — is prototyped in
+[`docs/error_position_scan_prototype.md`](docs/error_position_scan_prototype.md):
+
+```bash
+./scripts/run_error_position_scan_prototype.sh   # self-test, scanner agreement, differential
+                                                 # vs the Python reference, validator
+                                                 # cross-check, and a scan benchmark
+```
+
+All three are **standalone prototypes**: they are not Parabix kernels, the production validator
+is unchanged, and there is **no `TwoLevelScanKernel` subclass and no repair**. Their throughput
 figures are microbenchmarks on an in-memory buffer and are **not** comparable to the end-to-end
-validator numbers below. The LLmask generation core they share lives in
-`benchmarks/llmask_generation.h`.
+validator numbers below. The shared cores live in `benchmarks/llmask_generation.h` (LLmask) and
+`benchmarks/maskhl_aggregation.h` (maskHL).
 
 Thread scaling is analysed in [`docs/threading_analysis.md`](docs/threading_analysis.md)
 (helper: `benchmarks/analyze_thread_scaling.py`). **Note:** that analysis found that the
