@@ -41,10 +41,10 @@ index 00000000..9cd58967
 +)
 diff --git a/tools/utf16validate/utf16validate.cpp b/tools/utf16validate/utf16validate.cpp
 new file mode 100644
-index 00000000..63236bd5
+index 00000000..9d8daef1
 --- /dev/null
 +++ b/tools/utf16validate/utf16validate.cpp
-@@ -0,0 +1,474 @@
+@@ -0,0 +1,925 @@
 +/*
 + *  Part of the Parabix Project, under the Open Software License 3.0.
 + *  SPDX-License-Identifier: OSL-3.0
@@ -82,6 +82,23 @@ index 00000000..63236bd5
 +// differential oracle.
 +static cl::opt<bool> useSIMD("simd", cl::desc("Use the SIMD UTF-16LE validator (default: scalar)."),
 +                             cl::init(false), cl::cat(utf16validateOptions));
++
++// PROTOTYPE (issue #32). Selects the errorMarks producer pipeline instead of a count-only
++// one: the kernel emits a real StreamSet(1) bitstream with one bit per UTF-16 code unit,
++// set iff that code unit is ill-formed, and still reports the same errorCount. It is a
++// SEPARATE path -- the optimized count-only kernels are untouched and remain the default,
++// so this cannot regress them. There is no repair and no TwoLevelScanKernel subclass.
++static cl::opt<bool> emitErrorMarks("emit-error-marks",
++                                    cl::desc("PROTOTYPE: emit an errorMarks bitstream "
++                                             "(one bit per code unit) instead of counting only."),
++                                    cl::init(false), cl::cat(utf16validateOptions));
++
++// Prints the code-unit index of every set bit in errorMarks, so the emitted bitstream can be
++// diffed against the standalone prototypes. Requires --emit-error-marks.
++static cl::opt<bool> printPositions("print-positions",
++                                    cl::desc("PROTOTYPE: with --emit-error-marks, print the "
++                                             "code-unit position of every ill-formed unit."),
++                                    cl::init(false), cl::cat(utf16validateOptions));
 +
 +// ===========================================================================
 +// Scalar milestone (differential oracle) -- DO NOT MODIFY.
@@ -481,6 +498,430 @@ index 00000000..63236bd5
 +    b.setScalarField("errorCount", errorTotal);
 +}
 +
++// ===========================================================================
++// errorMarks producer -- PROTOTYPE (issue #32).
++// ===========================================================================
++//
++// This kernel is an ADDITION, not a replacement. The count-only paths above
++// (scalar oracle and UTF16ValidatorSIMDKernel) are untouched and remain the
++// default; --emit-error-marks selects this one instead. Nothing here repairs
++// anything, and there is no TwoLevelScanKernel subclass.
++//
++// It emits a real Parabix bitstream:
++//
++//     errorMarks : StreamSet(1)     -- ONE BIT PER UTF-16 CODE UNIT
++//     bit i == 1  iff  code unit i is ITSELF ill-formed
++//
++// Why this needs a different rule from the count-only kernel
++// ---------------------------------------------------------
++// UTF16ValidatorSIMDKernel counts mismatch[k] = isLow[k] XOR isHigh[k-1]. That
++// is exact for COUNTING, but it registers a lone high surrogate at its
++// SUCCESSOR's position: for D800 0041 it flags unit 1, which is the letter 'A'
++// -- a perfectly well-formed code unit. A consumer told to look at unit 1 would
++// be looking at the wrong code unit. A position-accurate marker must instead be
++//
++//     bad[k] = (isLow[k]  AND NOT isHigh[k-1])     // low with no high before it
++//           OR (isHigh[k] AND NOT isLow[k+1])      // high with no low after it
++//
++// and that needs code unit k+1 -- i.e. a ONE-CODE-UNIT LOOKAHEAD, which the
++// count-only kernel does not need. See docs/parabix_errormarks_producer.md.
++//
++// LookAhead(2): the rule reads the high byte of code unit k+1, at byte offset
++// 2k+3. For the last code unit of a segment that is up to 2 bytes past the
++// accessible extent, so the input declares LookAhead(2) (attributes.h:25-45):
++// the pipeline guarantees those items are valid and linearly contiguous, and
++// ZERO-FILLS them on the final call. Zero bytes are not low surrogates, so a
++// high surrogate at EOF marks itself -- exactly the semantics we want, with no
++// EOF special case. On a NON-final segment the lookahead holds the real next
++// segment's bytes, so a valid surrogate pair straddling a segment boundary is
++// correctly NOT marked.
++//
++// pendingHigh: unchanged in spirit from the count-only kernel. The previous
++// pack's isHi8 mask is carried as a VECTOR and shifted in with mvmd_dslli, and a
++// 1-bit pendingHigh InternalScalar threads that state across segments.
++//
++// Bytes -> bits reduction: NO hsimd_signmask(8). Issue #38 showed it has no
++// AArch64 lowering in IDISA and scalarises into ~16 lane extractions per call.
++// Instead each pack's marker bytes are weighted (simd_and with a constant) and
++// each 64-bit lane is OR-folded to 4 bits after ONE mvmd_extract(64, ...) --
++// one lane extraction per 4 code units instead of 16 per 8. This is the same
++// family of operations as the vector_pack_reduce prototype
++// (docs/llmask_generation_prototype.md), though deliberately the simple,
++// obviously-correct form rather than the fully optimised one.
++//
++// This kernel does strictly more work than the count-only kernel (it writes a
++// bitstream). It is NOT expected to be faster, and no such claim is made.
++class UTF16ErrorMarksKernel final : public MultiBlockKernel {
++public:
++    UTF16ErrorMarksKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream,
++                          StreamSet * errorMarks, Scalar * errorCount);
++private:
++    void generateMultiBlockLogic(KernelBuilder & b, llvm::Value * const numOfStrides) override;
++};
++
++UTF16ErrorMarksKernel::UTF16ErrorMarksKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream,
++                                             StreamSet * errorMarks, Scalar * errorCount)
++: MultiBlockKernel(ts, "utf16errormarks",
++// input: raw bytes, 2 per code unit. FixedRate(2) against the FixedRate(1) output gives
++// accessible(bytes) == 2 * writable(marks). Linear() for the raw byte reads; LookAhead(2)
++// for the k+1 term of the marker rule.
++{Binding{"byteStream", byteStream, FixedRate(2), {Linear(), LookAhead(2)}}},
++// output: one bit per code unit.
++{Binding{"errorMarks", errorMarks, FixedRate(1)}},
++// input scalars
++{},
++// output scalar: total ill-formed code units == popcount(errorMarks) + oddTrailingByte.
++{Binding{"errorCount", errorCount}},
++// internal (persistent) scalars carried across segments
++{InternalScalar{ts.getInt1Ty(), "pendingHigh"},
++ InternalScalar{ts.getSizeTy(), "errAccum"}}) {
++
++}
++
++void UTF16ErrorMarksKernel::generateMultiBlockLogic(KernelBuilder & b, llvm::Value * const /* numOfStrides */) {
++    Type * const sizeTy = b.getSizeTy();
++    Type * const i1Ty = b.getInt1Ty();
++    Type * const i8Ty = b.getInt8Ty();
++    Type * const i64Ty = b.getInt64Ty();
++
++    const unsigned BITS = b.getBitBlockWidth();
++    const unsigned BYTES_PER_PACK = BITS / 8;              // bytes in one SIMD pack
++    const unsigned UNITS_PER_PACK = BITS / 16;             // code units per pack
++    const unsigned HIGH_BYTE_POS = BYTES_PER_PACK - 1;     // last high-byte lane of a pack (LE)
++    const unsigned LANES_PER_PACK = BYTES_PER_PACK / 8;    // 64-bit lanes in a pack
++    const unsigned WORDS_PER_BLOCK = BITS / 64;            // 64-bit words in one marker block
++    // One marker block holds BITS code units == 2*BITS bytes == 16 packs, for every BITS.
++    const unsigned PACKS_PER_BLOCK = (2 * BITS) / BYTES_PER_PACK;   // == 16
++
++    FixedVectorType * const byteVecTy = FixedVectorType::get(i8Ty, BYTES_PER_PACK);
++    FixedVectorType * const wordVecTy = FixedVectorType::get(i64Ty, WORDS_PER_BLOCK);
++
++    // WEIGHTS: at the high-byte lane of each code unit, the bit that code unit owns within
++    // its 64-bit lane. Byte lane 8L+2j+1 (code unit 4L+j) gets weight 1<<j, j in [0,4).
++    // Even (low-byte) lanes get 0, which also masks off the garbage that the fw=8 compares
++    // leave there -- a low byte can coincidentally equal 0xD8/0xDC (e.g. code unit 0x00D8).
++    std::vector<Constant *> weightLanes(BYTES_PER_PACK);
++    for (unsigned pos = 0; pos < BYTES_PER_PACK; ++pos) {
++        const unsigned j = ((pos % 8) - 1) / 2;            // only meaningful for odd pos
++        weightLanes[pos] = ConstantInt::get(i8Ty, (pos & 1u) ? (1u << j) : 0u);
++    }
++    Constant * const WEIGHTS = ConstantVector::get(weightLanes);
++
++    Value * const ZERO = b.getSize(0);
++    Value * const ONE = b.getSize(1);
++
++    // Byte-oriented fw=8 classification splats (identical to the count-only kernel).
++    Value * const splatFC = b.simd_fill(8, b.getInt8(0xFC));
++    Value * const splatD8 = b.simd_fill(8, b.getInt8(0xD8));
++    Value * const splatDC = b.simd_fill(8, b.getInt8(0xDC));
++
++    Value * const avail = b.getAccessibleItemCount("byteStream");
++    Value * const validUnits = b.CreateLShr(avail, ONE);
++    Value * const fullBlocks = b.CreateUDiv(validUnits, b.getSize(BITS));   // whole marker blocks
++    Value * const tailBase = b.CreateMul(fullBlocks, b.getSize(BITS));      // first tail code unit
++
++    Value * const pendIn = b.getScalarField("pendingHigh");
++    Value * const errAccumIn = b.getScalarField("errAccum");
++
++    Value * const processed = b.getProcessedItemCount("byteStream");
++    Value * const i8base = b.getRawInputPointer("byteStream", processed);
++
++    // The carry: the previous pack's high-surrogate byte mask. Only its last high-byte lane
++    // matters, so the incoming pendingHigh is injected there as 0xFF (what simd_eq produces).
++    Value * const pendByte = b.CreateSExt(pendIn, i8Ty);
++    Value * const carryInit = b.CreateInsertElement(ConstantAggregateZero::get(byteVecTy),
++                                                    pendByte, b.getInt32(HIGH_BYTE_POS));
++
++    BasicBlock * const entry = b.GetInsertBlock();
++    BasicBlock * const blockLoop = b.CreateBasicBlock("markBlockLoop");
++    BasicBlock * const afterBlocks = b.CreateBasicBlock("afterMarkBlocks");
++    b.CreateCondBr(b.CreateICmpNE(fullBlocks, ZERO), blockLoop, afterBlocks);
++
++    // --- One full marker block (BITS code units) per iteration. -----------------------
++    b.SetInsertPoint(blockLoop);
++    PHINode * const blk = b.CreatePHI(sizeTy, 2);
++    PHINode * const prevHiPhi = b.CreatePHI(byteVecTy, 2);
++    PHINode * const errPhi = b.CreatePHI(sizeTy, 2);
++    blk->addIncoming(ZERO, entry);
++    prevHiPhi->addIncoming(carryInit, entry);
++    errPhi->addIncoming(ZERO, entry);
++
++    Value * const packBase = b.CreateMul(blk, b.getSize(PACKS_PER_BLOCK));
++    Value * carry = prevHiPhi;
++    std::vector<Value *> words(WORDS_PER_BLOCK, ConstantInt::get(i64Ty, 0));
++
++    for (unsigned sub = 0; sub < PACKS_PER_BLOCK; ++sub) {
++        Value * const P = b.CreateAdd(packBase, b.getSize(sub));
++        // Stream-pack addressing for a StreamSet(1,8): 8 packs per stream block.
++        Value * const packIndex = b.CreateTrunc(b.CreateAnd(P, b.getSize(7)), b.getInt32Ty());
++        Value * const blockOffset = b.CreateLShr(P, b.getSize(3));
++        Value * const pack = b.loadInputStreamPack("byteStream", ZERO, packIndex, blockOffset);
++
++        Value * const bytes = b.fwCast(8, pack);
++        Value * const masked = b.simd_and(bytes, splatFC);
++        Value * const isHi8 = b.simd_eq(8, masked, splatD8);
++        Value * const isLo8 = b.simd_eq(8, masked, splatDC);
++
++        // prevHigh[k] = isHigh[k-1 code unit] = isHi8 advanced by two byte lanes, with the
++        // previous pack's top lanes pulled into the vacated ones.
++        Value * const prevHi = b.mvmd_dslli(8, isHi8, carry, 2);
++
++        // nextLow[k] = isLow[k+1 code unit] = isLo8 shifted DOWN by two byte lanes. Only the
++        // LAST high-byte lane needs data from beyond this pack, and it needs exactly ONE byte:
++        // the high byte of the next pack's first code unit, at raw offset
++        // (P+1)*BYTES_PER_PACK + 1. That is at most `avail + 1`, which LookAhead(2) covers --
++        // and which the pipeline zero-fills on the final call, so a trailing high surrogate
++        // marks itself with no EOF special case.
++        Value * const laOff = b.CreateAdd(b.CreateMul(b.CreateAdd(P, ONE),
++                                                      b.getSize(BYTES_PER_PACK)), ONE);
++        Value * const laByte = b.CreateLoad(i8Ty, b.CreateGEP(i8Ty, i8base, laOff));
++        Value * const laIsLow = b.CreateICmpEQ(b.CreateAnd(laByte, b.getInt8(0xFC)),
++                                               b.getInt8(0xDC));
++        Value * const laVec = b.CreateInsertElement(ConstantAggregateZero::get(byteVecTy),
++                                                    b.CreateSExt(laIsLow, i8Ty), b.getInt32(1));
++        // mvmd_dslli(fw, a, b, s): result[i] = a[i-s] for i>=s, else b[fieldCount-s+i].
++        // With s = BYTES_PER_PACK-2: result[i] = isLo8[i+2] for i < BYTES_PER_PACK-2, and the
++        // top two lanes come from laVec[0], laVec[1] -- laVec[1] being the byte we just read.
++        Value * const nextLo = b.mvmd_dslli(8, laVec, isLo8, BYTES_PER_PACK - 2);
++
++        // bad[k] = (isLow[k] & !isHigh[k-1]) | (isHigh[k] & !isLow[k+1])
++        Value * const bad = b.simd_or(b.simd_and(isLo8, b.simd_not(prevHi)),
++                                      b.simd_and(isHi8, b.simd_not(nextLo)));
++
++        // Reduce marker bytes to marker bits without hsimd_signmask: weight the high-byte
++        // lanes, then OR-fold each 64-bit lane (one mvmd_extract per 4 code units).
++        Value * const weighted = b.simd_and(bad, WEIGHTS);
++        for (unsigned L = 0; L < LANES_PER_PACK; ++L) {
++            Value * x = b.CreateZExtOrTrunc(b.mvmd_extract(64, weighted, L), i64Ty);
++            x = b.CreateOr(x, b.CreateLShr(x, ConstantInt::get(i64Ty, 32)));
++            x = b.CreateOr(x, b.CreateLShr(x, ConstantInt::get(i64Ty, 16)));
++            x = b.CreateOr(x, b.CreateLShr(x, ConstantInt::get(i64Ty, 8)));
++            x = b.CreateAnd(x, ConstantInt::get(i64Ty, 0x0F));   // 4 code units, 4 bits
++            const unsigned bitOff = sub * UNITS_PER_PACK + L * 4;
++            const unsigned w = bitOff / 64;
++            const unsigned sh = bitOff % 64;
++            words[w] = b.CreateOr(words[w], b.CreateShl(x, ConstantInt::get(i64Ty, sh)));
++        }
++        carry = isHi8;
++    }
++
++    // Assemble and store the marker block; count the bits we actually emitted, so errorCount
++    // is by construction popcount(errorMarks) + oddTrailingByte.
++    Value * blockVec = ConstantAggregateZero::get(wordVecTy);
++    Value * errAdd = ConstantInt::get(sizeTy, 0);
++    for (unsigned w = 0; w < WORDS_PER_BLOCK; ++w) {
++        blockVec = b.CreateInsertElement(blockVec, words[w], b.getInt32(w));
++        errAdd = b.CreateAdd(errAdd, b.CreateZExtOrTrunc(
++            b.CreateUnaryIntrinsic(Intrinsic::ctpop, words[w]), sizeTy));
++    }
++    b.storeOutputStreamBlock("errorMarks", ZERO, blk,
++                             b.CreateBitCast(blockVec, b.getBitBlockType()));
++
++    Value * const errNext = b.CreateAdd(errPhi, errAdd);
++    Value * const nextBlk = b.CreateAdd(blk, ONE);
++    blk->addIncoming(nextBlk, b.GetInsertBlock());
++    prevHiPhi->addIncoming(carry, b.GetInsertBlock());
++    errPhi->addIncoming(errNext, b.GetInsertBlock());
++    b.CreateCondBr(b.CreateICmpNE(nextBlk, fullBlocks), blockLoop, afterBlocks);
++
++    // --- After the full blocks: recover the carry and the running count -----------------
++    b.SetInsertPoint(afterBlocks);
++    PHINode * const carryFinal = b.CreatePHI(byteVecTy, 2);
++    carryFinal->addIncoming(carryInit, entry);
++    carryFinal->addIncoming(carry, blockLoop);
++    PHINode * const errFinal = b.CreatePHI(sizeTy, 2);
++    errFinal->addIncoming(ZERO, entry);
++    errFinal->addIncoming(errNext, blockLoop);
++
++    Value * const lastHiByte = b.mvmd_extract(8, carryFinal, HIGH_BYTE_POS);
++    Value * const carryBool = b.CreateICmpNE(lastHiByte, ConstantInt::get(i8Ty, 0));
++
++    // --- Tail: the fewer-than-BITS code units after the last full marker block ----------
++    // Byte-oriented and scalar. It builds the final PARTIAL marker block bit by bit in an
++    // alloca and stores it, leaving the bits past the last code unit zero -- so a consumer
++    // that reads whole blocks never sees a phantom marker.
++    Value * const tailWords = b.CreateAlloca(wordVecTy);
++    b.CreateStore(ConstantAggregateZero::get(wordVecTy), tailWords);
++    Value * const wordArray = b.CreatePointerCast(tailWords, i64Ty->getPointerTo());
++
++    BasicBlock * const tailLoop = b.CreateBasicBlock("markTailLoop");
++    BasicBlock * const tailDone = b.CreateBasicBlock("markTailDone");
++    Value * const hasTail = b.CreateICmpNE(tailBase, validUnits);
++    b.CreateCondBr(hasTail, tailLoop, tailDone);
++
++    b.SetInsertPoint(tailLoop);
++    PHINode * const idx = b.CreatePHI(sizeTy, 2);
++    PHINode * const tErr = b.CreatePHI(sizeTy, 2);
++    PHINode * const pend = b.CreatePHI(i1Ty, 2);
++    idx->addIncoming(tailBase, afterBlocks);
++    tErr->addIncoming(ZERO, afterBlocks);
++    pend->addIncoming(carryBool, afterBlocks);
++
++    // High byte of code unit idx (2*idx+1) and of code unit idx+1 (2*idx+3). The latter is at
++    // most avail+1, inside the LookAhead(2) region, and zero at EOF.
++    Value * const hiOff = b.CreateAdd(b.CreateShl(idx, ONE), ONE);
++    Value * const hiByte = b.CreateLoad(i8Ty, b.CreateGEP(i8Ty, i8base, hiOff));
++    Value * const nxByte = b.CreateLoad(i8Ty, b.CreateGEP(i8Ty, i8base,
++                                                          b.CreateAdd(hiOff, b.getSize(2))));
++    Value * const tMasked = b.CreateAnd(hiByte, b.getInt8(0xFC));
++    Value * const tIsHigh = b.CreateICmpEQ(tMasked, b.getInt8(0xD8));
++    Value * const tIsLow  = b.CreateICmpEQ(tMasked, b.getInt8(0xDC));
++    Value * const tNextLow = b.CreateICmpEQ(b.CreateAnd(nxByte, b.getInt8(0xFC)), b.getInt8(0xDC));
++    Value * const tBad = b.CreateOr(b.CreateAnd(tIsLow, b.CreateNot(pend)),
++                                    b.CreateAnd(tIsHigh, b.CreateNot(tNextLow)));
++
++    // Set bit (idx - tailBase) of the partial block.
++    Value * const local = b.CreateSub(idx, tailBase);
++    Value * const wIdx = b.CreateLShr(local, b.getSize(6));
++    Value * const bIdx = b.CreateAnd(local, b.getSize(63));
++    Value * const wPtr = b.CreateGEP(i64Ty, wordArray, wIdx);
++    Value * const wOld = b.CreateLoad(i64Ty, wPtr);
++    Value * const bit = b.CreateShl(b.CreateZExt(tBad, i64Ty),
++                                    b.CreateZExtOrTrunc(bIdx, i64Ty));
++    b.CreateStore(b.CreateOr(wOld, bit), wPtr);
++
++    Value * const tErrNext = b.CreateAdd(tErr, b.CreateZExt(tBad, sizeTy));
++    Value * const idxNext = b.CreateAdd(idx, ONE);
++    idx->addIncoming(idxNext, tailLoop);
++    tErr->addIncoming(tErrNext, tailLoop);
++    pend->addIncoming(tIsHigh, tailLoop);
++    b.CreateCondBr(b.CreateICmpNE(idxNext, validUnits), tailLoop, tailDone);
++
++    b.SetInsertPoint(tailDone);
++    PHINode * const tErrTotal = b.CreatePHI(sizeTy, 2);
++    PHINode * const pendFinal = b.CreatePHI(i1Ty, 2);
++    tErrTotal->addIncoming(ZERO, afterBlocks);
++    tErrTotal->addIncoming(tErrNext, tailLoop);
++    pendFinal->addIncoming(carryBool, afterBlocks);
++    pendFinal->addIncoming(tIsHigh, tailLoop);
++
++    // Store the partial block only if there is one.
++    BasicBlock * const storeTail = b.CreateBasicBlock("storeTailBlock");
++    BasicBlock * const finish = b.CreateBasicBlock("markFinish");
++    b.CreateCondBr(hasTail, storeTail, finish);
++
++    b.SetInsertPoint(storeTail);
++    Value * const tailBlock = b.CreateLoad(wordVecTy, tailWords);
++    b.storeOutputStreamBlock("errorMarks", ZERO, fullBlocks,
++                             b.CreateBitCast(tailBlock, b.getBitBlockType()));
++    b.CreateBr(finish);
++
++    b.SetInsertPoint(finish);
++
++    // errAccum = every marker bit emitted so far, across all segments. A dangling final high
++    // surrogate needs NO EOF adjustment here: the zero-filled lookahead already made the rule
++    // mark it in the stream. The odd trailing byte is the one error with no code-unit
++    // position, so it -- and only it -- is added at EOF.
++    Value * const newErrAccum = b.CreateAdd(errAccumIn, b.CreateAdd(errFinal, tErrTotal));
++    Value * const atEOF = b.isFinal();
++    Value * const oddByte = b.CreateAnd(atEOF,
++                                        b.CreateICmpNE(b.CreateAnd(avail, ONE), ZERO));
++    Value * const errorTotal = b.CreateAdd(newErrAccum, b.CreateZExt(oddByte, sizeTy));
++
++    b.setScalarField("errAccum", newErrAccum);
++    b.setScalarField("pendingHigh", b.CreateSelect(atEOF, b.getInt1(false), pendFinal));
++    b.setScalarField("errorCount", errorTotal);
++}
++
++// ===========================================================================
++// errorMarks consumer -- PROTOTYPE, position printer (issue #32).
++// ===========================================================================
++//
++// A deliberately minimal sink: it reads the errorMarks bitstream and prints the
++// code-unit index of every set bit, using the SAME ctz / reset-lowest-bit inner
++// loop as Parabix's TwoLevelScanKernel (CreateCountForwardZeroes and
++// CreateResetLowestBit, lib/kernel/scan/base.cpp:221). It exists ONLY so the
++// contents of the emitted bitstream can be diffed against the standalone
++// prototypes; it is NOT a TwoLevelScanKernel subclass, it builds no maskHL, and
++// it skips nothing. Selected by --print-positions.
++//
++// Positions are printed with CallPrintInt (hexadecimal). Under multiple pipeline
++// threads segments may interleave, so callers must sort; the test script uses
++// -thread-num=1 and sorts anyway.
++class ErrorMarkPositionKernel final : public MultiBlockKernel {
++public:
++    ErrorMarkPositionKernel(LLVMTypeSystemInterface & ts, StreamSet * errorMarks);
++private:
++    void generateMultiBlockLogic(KernelBuilder & b, llvm::Value * const numOfStrides) override;
++};
++
++ErrorMarkPositionKernel::ErrorMarkPositionKernel(LLVMTypeSystemInterface & ts, StreamSet * errorMarks)
++: MultiBlockKernel(ts, "utf16errormarkpositions",
++{Binding{"errorMarks", errorMarks, FixedRate(1)}},
++{}, {}, {}, {}) {
++    // This kernel has no stream or scalar outputs -- its only result is what it prints. Without
++    // SideEffecting() the pipeline is free to consider it dead and never schedule it, and it
++    // silently prints nothing (attributes.h:280-284: "a kernel that reports its result through
++    // StdOut/StdErr should be marked as SideEffecting").
++    addAttribute(SideEffecting());
++}
++
++void ErrorMarkPositionKernel::generateMultiBlockLogic(KernelBuilder & b, llvm::Value * const /* numOfStrides */) {
++    Type * const sizeTy = b.getSizeTy();
++    Type * const i64Ty = b.getInt64Ty();
++
++    const unsigned BITS = b.getBitBlockWidth();
++    const unsigned WORDS_PER_BLOCK = BITS / 64;
++
++    Value * const ZERO = b.getSize(0);
++    Value * const ONE = b.getSize(1);
++    Value * const processed = b.getProcessedItemCount("errorMarks");
++    Value * const accessible = b.getAccessibleItemCount("errorMarks");
++    // Blocks that contain at least one accessible marker bit.
++    Value * const numBlocks = b.CreateUDiv(b.CreateAdd(accessible, b.getSize(BITS - 1)),
++                                           b.getSize(BITS));
++
++    BasicBlock * const entry = b.GetInsertBlock();
++    BasicBlock * const blockLoop = b.CreateBasicBlock("posBlockLoop");
++    BasicBlock * const done = b.CreateBasicBlock("posDone");
++    b.CreateCondBr(b.CreateICmpNE(numBlocks, ZERO), blockLoop, done);
++
++    b.SetInsertPoint(blockLoop);
++    PHINode * const blk = b.CreatePHI(sizeTy, 2);
++    blk->addIncoming(ZERO, entry);
++    Value * const marks = b.loadInputStreamBlock("errorMarks", ZERO, blk);
++
++    for (unsigned w = 0; w < WORDS_PER_BLOCK; ++w) {
++        Value * const localBase = b.CreateAdd(b.CreateMul(blk, b.getSize(BITS)),
++                                              b.getSize(w * 64));
++        // Mask off any bits at or beyond the accessible extent: on the final partial block
++        // the producer left them zero, but a circular buffer may still hold stale bits.
++        Value * const inRange = b.CreateICmpUGT(accessible, localBase);
++        Value * const rem = b.CreateSelect(inRange, b.CreateSub(accessible, localBase), ZERO);
++        Value * const full = b.CreateICmpUGE(rem, b.getSize(64));
++        Value * const partialMask = b.CreateSub(
++            b.CreateShl(ConstantInt::get(i64Ty, 1), b.CreateZExtOrTrunc(rem, i64Ty)),
++            ConstantInt::get(i64Ty, 1));
++        Value * const mask = b.CreateSelect(full, ConstantInt::get(i64Ty, ~0ULL), partialMask);
++        Value * const word0 = b.CreateAnd(
++            b.CreateZExtOrTrunc(b.mvmd_extract(64, marks, w), i64Ty), mask);
++
++        BasicBlock * const bitLoop = b.CreateBasicBlock("posBitLoop");
++        BasicBlock * const bitDone = b.CreateBasicBlock("posBitDone");
++        BasicBlock * const wordEntry = b.GetInsertBlock();
++        b.CreateCondBr(b.CreateICmpNE(word0, ConstantInt::get(i64Ty, 0)), bitLoop, bitDone);
++
++        b.SetInsertPoint(bitLoop);
++        PHINode * const word = b.CreatePHI(i64Ty, 2);
++        word->addIncoming(word0, wordEntry);
++        // The TwoLevelScanKernel inner loop: ctz to the next set bit, then reset it.
++        Value * const bit = b.CreateZExtOrTrunc(b.CreateCountForwardZeroes(word), sizeTy);
++        Value * const pos = b.CreateAdd(b.CreateAdd(processed, localBase), bit);
++        b.CallPrintInt("errpos", pos, CBuilder::STD_FD::STD_OUT);
++        Value * const wordNext = b.CreateResetLowestBit(word);
++        word->addIncoming(wordNext, b.GetInsertBlock());
++        b.CreateCondBr(b.CreateICmpNE(wordNext, ConstantInt::get(i64Ty, 0)), bitLoop, bitDone);
++
++        b.SetInsertPoint(bitDone);
++    }
++
++    Value * const nextBlk = b.CreateAdd(blk, ONE);
++    blk->addIncoming(nextBlk, b.GetInsertBlock());
++    b.CreateCondBr(b.CreateICmpNE(nextBlk, numBlocks), blockLoop, done);
++
++    b.SetInsertPoint(done);
++}
++
 +typedef uint64_t (*utf16validateFunctionType)(const uint32_t fd);
 +
 +utf16validateFunctionType utf16validatePipelineGen(CPUDriver & driver) {
@@ -488,7 +929,17 @@ index 00000000..63236bd5
 +    Scalar * const fileDescriptor = P.getInputScalar("fd");
 +    StreamSet * const ByteStream = P.CreateStreamSet(1, 8);
 +    P.CreateKernelCall<ReadSourceKernel>(fileDescriptor, ByteStream);
-+    if (useSIMD) {
++    if (emitErrorMarks) {
++        // Prototype producer path (issue #32). Emits a real StreamSet(1) bitstream, one bit
++        // per code unit, alongside the same errorCount the other paths report. The count-only
++        // kernels above are untouched and are still what --simd and the default select.
++        StreamSet * const ErrorMarks = P.CreateStreamSet(1);
++        P.CreateKernelCall<UTF16ErrorMarksKernel>(ByteStream, ErrorMarks,
++                                                  P.getOutputScalar("errorCount"));
++        if (printPositions) {
++            P.CreateKernelCall<ErrorMarkPositionKernel>(ErrorMarks);
++        }
++    } else if (useSIMD) {
 +        // SIMD path: one self-contained kernel produces errorCount directly.
 +        P.CreateKernelCall<UTF16ValidatorSIMDKernel>(ByteStream, P.getOutputScalar("errorCount"));
 +    } else {
