@@ -125,6 +125,16 @@ not be expressed). Reinstating a marker stream is therefore known to be feasible
 
 ## 3. Where the LLmask could come from — and the Issue #38 trap
 
+> **Update (issue #29).** This section framed the vector→bitstream reduction as the open
+> problem. It has since been prototyped and measured — see
+> [`llmask_generation_prototype.md`](llmask_generation_prototype.md). Option 2 below (the
+> pack-based reduction) won: **6.1× scalar**, with no `hsimd_signmask` anywhere. Option 3
+> (scalar) is a viable fallback but is 6× slower. Option 1 (`hsimd_signmask(8)`) is confirmed
+> as the trap it was suspected to be. The prototype also found something this section missed:
+> the LLmask rule needs a **one-code-unit lookahead**, because the validator's backward-only
+> XOR marks the *successor* of a lone high surrogate rather than the surrogate itself — the
+> wrong position for repair. The analysis below is kept as written for the record.
+
 Our mismatch is currently computed as a **byte vector**: `0x01` at the high-byte lane of each
 ill-formed code unit (see `docs/SIMD_BYTE_ORIENTED_VALIDATOR.md`). To feed a scan kernel we must
 compress 16 bytes → 8 bits (one bit per code unit). That compression is exactly a movemask.
@@ -308,9 +318,15 @@ grep -rn "CreateCountForwardZeroes\|CreateResetLowestBit" .deps/parabix/include/
 
 ## 9. Recommended order for the follow-up issues
 
-1. **Prototype the LLmask producer and measure it** — scalar builder vs. `hsimd_packh/packl` tree
-   vs. `hsimd_signmask(8)`. This is the decision that determines whether the whole approach is
-   viable. Everything else is comparatively mechanical.
+1. ~~**Prototype the LLmask producer and measure it**~~ — **done in issue #29**; see
+   [`llmask_generation_prototype.md`](llmask_generation_prototype.md). Outcome: a pack-based
+   reduction (`hsimd_packh(16, …)` to densify + `mvmd_extract(64, …)` + OR-fold) runs at **6.1×
+   scalar** and **2.4× even a compiler-optimised movemask**, and every step maps to an IDISA
+   primitive that already exists and is ARM-overridden — so §3's "the vector→bitstream step is
+   the open problem" is closed **at the algorithm level**. Two things changed as a result:
+   the LLmask needs a **one-code-unit lookahead** that the current validator does not (§2 below
+   is superseded by that note), and the remaining risk moved from *algorithm* to *kernel
+   integration*. Everything else is comparatively mechanical.
 2. Emit the `errorMarks` bitstream from the validator (behind a flag, so the count-only fast path
    is preserved and benchmarks stay comparable).
 3. Subclass `TwoLevelScanKernel` to *locate* errors (report positions only — still no repair).
