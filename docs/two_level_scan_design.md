@@ -327,6 +327,17 @@ grep -rn "CreateCountForwardZeroes\|CreateResetLowestBit" .deps/parabix/include/
    the LLmask needs a **one-code-unit lookahead** that the current validator does not (§2 below
    is superseded by that note), and the remaining risk moved from *algorithm* to *kernel
    integration*. Everything else is comparatively mechanical.
+1b. ~~**Aggregate LLmasks into maskHL**~~ — **done in issue #30**; see
+   [`maskhl_aggregation_prototype.md`](maskhl_aggregation_prototype.md). Outcome: aggregation is
+   correct on every boundary case and cross-checks against the validator's error count, and its
+   cost is **below the benchmark's run-to-run noise** (~±4%) on top of LLmask generation.
+   **Valid text yields `maskHL == 0` everywhere — a 100% region skip rate**, which is the
+   structural argument for this whole design, now measured. Two things worth carrying forward:
+   the fw=64 `hsimd_signmask` used by `generateIndexComputation` (§1a) is confirmed to be a
+   different cost class from the fw=8 one that issue #38 found pathological (2 lanes/block vs
+   16), so the trap does **not** extend to this level; and the two levels **degrade at different
+   rates** — with scattered errors at 0.1% the region skip collapses to 1.6% while 93.8% of
+   LLmasks are still clean, so level 2 keeps paying off well after level 1 has stopped.
 2. Emit the `errorMarks` bitstream from the validator (behind a flag, so the count-only fast path
    is preserved and benchmarks stay comparable).
 3. Subclass `TwoLevelScanKernel` to *locate* errors (report positions only — still no repair).
