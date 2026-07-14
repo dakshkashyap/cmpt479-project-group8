@@ -326,11 +326,24 @@ The consumer — scanning maskHL and the LLmasks with `ctz` / reset-lowest-bit t
                                                  # cross-check, and a scan benchmark
 ```
 
-All three are **standalone prototypes**: they are not Parabix kernels, the production validator
-is unchanged, and there is **no `TwoLevelScanKernel` subclass and no repair**. Their throughput
-figures are microbenchmarks on an in-memory buffer and are **not** comparable to the end-to-end
-validator numbers below. The shared cores live in `benchmarks/llmask_generation.h` (LLmask) and
+Those three are **standalone prototypes**: not Parabix kernels, and their throughput figures are
+microbenchmarks on an in-memory buffer, **not** comparable to the end-to-end validator numbers
+below. Their shared cores live in `benchmarks/llmask_generation.h` (LLmask) and
 `benchmarks/maskhl_aggregation.h` (maskHL).
+
+**In the real pipeline**, a `UTF16ErrorMarksKernel` now emits a genuine Parabix
+`StreamSet(1)` — one bit per UTF-16 code unit, set iff that code unit is ill-formed — see
+[`docs/parabix_errormarks_producer.md`](docs/parabix_errormarks_producer.md):
+
+```bash
+utf16validate --emit-error-marks FILE                   # emit the bitstream; same errorCount
+utf16validate --emit-error-marks --print-positions FILE # print each ill-formed code unit's index
+./scripts/test_errormarks.sh                            # 49/49: count + stream, 4 segment sizes
+```
+
+The optimized **count-only validator is untouched** (both existing kernels are byte-identical)
+and remains the default, so this cannot regress it. There is still **no `TwoLevelScanKernel`
+subclass and no repair**.
 
 Thread scaling is analysed in [`docs/threading_analysis.md`](docs/threading_analysis.md)
 (helper: `benchmarks/analyze_thread_scaling.py`). **Note:** that analysis found that the

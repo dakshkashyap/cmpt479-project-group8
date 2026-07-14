@@ -349,10 +349,20 @@ grep -rn "CreateCountForwardZeroes\|CreateResetLowestBit" .deps/parabix/include/
    scan** on clean data (it reads 32 KiB of maskHL instead of 2 MiB of LLmasks), and ~4200×
    faster than testing every bit. **The remaining risk is entirely on the producer side**: the
    cost of this design is building the mask stream, not scanning it.
-2. Emit the `errorMarks` bitstream from the validator (behind a flag, so the count-only fast path
-   is preserved and benchmarks stay comparable).
-3. Subclass `TwoLevelScanKernel` to *locate* errors (report positions only — still no repair).
-   Validate positions against the Python reference, which already knows exactly where every
-   injected error is (issue #23 generators).
+2. ~~**Emit the `errorMarks` bitstream from the validator**~~ — **done in issue #32**; see
+   [`parabix_errormarks_producer.md`](parabix_errormarks_producer.md). A **real Parabix
+   `StreamSet(1)`** (one bit per code unit, set iff that code unit is ill-formed) is now emitted
+   by a new `UTF16ErrorMarksKernel`, behind `--emit-error-marks`; the optimized count-only
+   kernels are byte-identical and remain the default. The `LookAhead(2)` that issue #29 predicted
+   is exactly what the position-accurate rule needs, and it also removes the dangling-high EOF
+   special case (the zero-filled lookahead makes a trailing high surrogate mark itself). The
+   kernel's emitted positions are **identical to the prototypes on 32 MiB (2208/2208)**, and
+   emitting the stream costs only **~5-8% per byte** over counting alone. Producing the
+   bitstream — long flagged as the project's main remaining risk — is done.
+3. Subclass `TwoLevelScanKernel` over `errorMarks` to *locate* errors while skipping clean
+   regions (report positions only — still no repair). Validate positions against the Python
+   reference, which already knows exactly where every injected error is (issue #23 generators).
+   **This is now the only missing piece**: the producer exists (issue #32) and the consumer was
+   measured as effectively free (issue #31).
 4. Define the repair policy in writing (§5) **before** writing repair code.
 5. Only then implement repair.
