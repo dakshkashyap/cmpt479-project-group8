@@ -41,10 +41,10 @@ index 00000000..9cd58967
 +)
 diff --git a/tools/utf16validate/utf16validate.cpp b/tools/utf16validate/utf16validate.cpp
 new file mode 100644
-index 00000000..53b7bb90
+index 00000000..63236bd5
 --- /dev/null
 +++ b/tools/utf16validate/utf16validate.cpp
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,474 @@
 +/*
 + *  Part of the Parabix Project, under the Open Software License 3.0.
 + *  SPDX-License-Identifier: OSL-3.0
@@ -223,10 +223,17 @@ index 00000000..53b7bb90
 +//     (highByte & 0xFC) == 0xDC  => low  surrogate (0xDC00-0xDFFF)
 +// The low byte is never inspected. This mirrors the high-byte NEON strategy of
 +// Clausecker & Lemire and, being byte-level, needs no little-endian *host*
-+// guard: hsimd_signmask(8, ...) yields one bit per byte position (bit i <-
-+// byte i), and we select the high byte of code unit k by memory *position*
-+// (byte 2k+1 for UTF-16LE), not by host significance. UTF-16BE support (issue
-+// #2) is the one-line change of selecting the even byte positions instead.
++// guard: we select the high byte of code unit k by memory *position* (byte 2k+1
++// for UTF-16LE), not by host lane significance. UTF-16BE support is the one-line
++// change of selecting the even byte positions instead.
++//
++// The pairing check stays entirely in vector registers: the previous pack's
++// high-surrogate mask is carried as a vector and advanced with mvmd_dslli, and the
++// per-pack count is a single bitblock_popcount. No per-byte mask is extracted to a
++// scalar register in the loop. An earlier version used hsimd_signmask(8, ...) here;
++// on AArch64 that has no NEON lowering in IDISA and expanded into ~16 lane
++// extractions plus scalar bit assembly per call, which dominated the hot loop
++// (see docs/simd_regression_investigation.md).
 +//
 +// Marker semantics (accurate naming): the quantity counted here is
 +//     mismatch[k] = isLow[k] XOR isHigh[k-1]
@@ -284,28 +291,33 @@ index 00000000..53b7bb90
 +    Type * const sizeTy = b.getSizeTy();
 +    Type * const i1Ty = b.getInt1Ty();
 +    Type * const i8Ty = b.getInt8Ty();
-+    Type * const i64Ty = b.getInt64Ty();
 +
 +    const unsigned BITS = b.getBitBlockWidth();
 +    const unsigned BYTES_PER_PACK = BITS / 8;           // bytes in one SIMD pack
 +    const unsigned UNITS_PER_PACK = BITS / 16;          // complete UTF-16 code units per pack
 +    const unsigned HIGH_BYTE_POS = BYTES_PER_PACK - 1;  // last high-byte position in a pack (LE)
 +
-+    // ODD_MASK selects the high-byte position of every code unit. For UTF-16LE
++    // Byte-lane vector type for one pack. The whole pairing check stays in this type:
++    // nothing is extracted to a scalar bitmask inside the loop.
++    FixedVectorType * const byteVecTy = FixedVectorType::get(i8Ty, BYTES_PER_PACK);
++
++    // ODD_ONE_MASK selects the high-byte position of every code unit. For UTF-16LE
 +    // the high byte of code unit k is memory byte 2k+1 -- the odd byte positions
 +    // 1, 3, 5, ..., BYTES_PER_PACK-1. Selecting by *position* (not by host lane
 +    // significance) is what makes the classification host-endian agnostic;
-+    // UTF-16BE support (issue #2) only flips this to the even positions.
-+    uint64_t oddMaskC = 0;
-+    for (unsigned pos = 1; pos < BYTES_PER_PACK; pos += 2) {
-+        oddMaskC |= (static_cast<uint64_t>(1) << pos);
++    // UTF-16BE support would only flip this to the even positions.
++    //
++    // It leaves a single set bit (0x01) at each selected position rather than a full
++    // 0xFF byte, so one block popcount of the masked mismatch vector is exactly the
++    // number of ill-formed code units -- no per-byte mask extraction is needed.
++    std::vector<Constant *> oddLanes(BYTES_PER_PACK);
++    for (unsigned pos = 0; pos < BYTES_PER_PACK; ++pos) {
++        oddLanes[pos] = ConstantInt::get(i8Ty, (pos & 1u) ? 0x01 : 0x00);
 +    }
-+    Value * const ODD_MASK = b.getInt64(oddMaskC);
++    Constant * const ODD_ONE_MASK = ConstantVector::get(oddLanes);
 +
 +    Value * const ZERO = b.getSize(0);
 +    Value * const ONE = b.getSize(1);
-+    Value * const i64ZERO = b.getInt64(0);
-+    Value * const i64ONE = b.getInt64(1);
 +
 +    // Byte-oriented fw=8 surrogate classification splats. The high byte alone
 +    // decides the class: (highByte & 0xFC) == 0xD8 => high surrogate,
@@ -325,9 +337,14 @@ index 00000000..53b7bb90
 +    Value * const pendIn = b.getScalarField("pendingHigh");                     // i1
 +    Value * const errAccumIn = b.getScalarField("errAccum");                    // running total, no EOF
 +
-+    // The carry is a single bit: was the previous code unit an unmatched high
-+    // surrogate? It threads across packs, blocks and segments as a scalar.
-+    Value * const carryInit = b.CreateZExt(pendIn, i64Ty);
++    // The carry state -- "was the previous code unit an unmatched high surrogate?" --
++    // is threaded as a *vector*: the previous pack's high-surrogate byte mask. Only its
++    // last high-byte lane matters, so the incoming pendingHigh scalar is injected there
++    // (0xFF = set, matching what simd_eq produces). Keeping the carry in vector form is
++    // what lets the loop shift it with mvmd_dslli instead of extracting a scalar bit.
++    Value * const pendByte = b.CreateSExt(pendIn, i8Ty);            // 0xFF if pending, else 0x00
++    Value * const carryInit = b.CreateInsertElement(ConstantAggregateZero::get(byteVecTy),
++                                                    pendByte, b.getInt32(HIGH_BYTE_POS));
 +
 +    BasicBlock * const entry = b.GetInsertBlock();
 +    BasicBlock * const simdLoop = b.CreateBasicBlock("simdLoop");
@@ -339,55 +356,67 @@ index 00000000..53b7bb90
 +    // p / 8), the stream-pack layout used throughout the Parabix byte kernels.
 +    // Every byte read is < avail (fullPacks*BYTES_PER_PACK <= avail), in-bounds. ---
 +    b.SetInsertPoint(simdLoop);
-+    PHINode * const p = b.CreatePHI(sizeTy, 2);         // pack index
-+    PHINode * const carryPhi = b.CreatePHI(i64Ty, 2);   // pending-high carry bit (0/1)
-+    PHINode * const markPhi = b.CreatePHI(sizeTy, 2);   // running mismatch popcount this invocation
++    PHINode * const p = b.CreatePHI(sizeTy, 2);              // pack index
++    PHINode * const prevHiPhi = b.CreatePHI(byteVecTy, 2);   // previous pack's high-surrogate mask
++    PHINode * const markPhi = b.CreatePHI(sizeTy, 2);        // running mismatch count this invocation
 +    p->addIncoming(ZERO, entry);
-+    carryPhi->addIncoming(carryInit, entry);
++    prevHiPhi->addIncoming(carryInit, entry);
 +    markPhi->addIncoming(ZERO, entry);
 +
 +    Value * const packIndex = b.CreateTrunc(b.CreateAnd(p, b.getSize(7)), b.getInt32Ty());
 +    Value * const blockOffset = b.CreateLShr(p, b.getSize(3));
 +    Value * const pack = b.loadInputStreamPack("byteStream", ZERO, packIndex, blockOffset);
 +
-+    // Classify every byte at fw=8; hsimd_signmask(8, ...) yields one bit per byte
-+    // position (bit i <- byte i, the standard IDISA convention on LE targets).
-+    // The high-byte results therefore land at the odd bit positions.
++    // Classify every byte at fw=8. The high byte alone decides the class:
++    //   (highByte & 0xFC) == 0xD8 -> high surrogate,  == 0xDC -> low surrogate.
++    // simd_eq yields an all-ones (0xFF) byte at each matching position.
 +    Value * const bytes = b.fwCast(8, pack);
 +    Value * const masked = b.simd_and(bytes, splatFC);
 +    Value * const isHi8 = b.simd_eq(8, masked, splatD8);
 +    Value * const isLo8 = b.simd_eq(8, masked, splatDC);
-+    Value * const hiBits = b.CreateZExtOrTrunc(b.hsimd_signmask(8, isHi8), i64Ty);
-+    Value * const loBits = b.CreateZExtOrTrunc(b.hsimd_signmask(8, isLo8), i64Ty);
 +
-+    // Pairing check on the high-byte stream: mismatch[k] = isLow[k] XOR isHigh[k-1].
-+    // Advance the high-surrogate bits by one code unit (two byte positions) and
-+    // inject the incoming carry at the first code unit's predecessor slot (bit 1).
-+    // Masking to the odd (high-byte) positions discards the meaningless low-byte
-+    // comparisons.
-+    Value * const shifted = b.CreateOr(b.CreateShl(hiBits, b.getInt64(2)),
-+                                       b.CreateShl(carryPhi, i64ONE));
-+    Value * const mism = b.CreateAnd(b.CreateXor(loBits, shifted), ODD_MASK);
-+    Value * const markNext = b.CreateAdd(markPhi, b.CreateZExtOrTrunc(b.CreatePopcount(mism), sizeTy));
++    // Pairing check, performed entirely in vector registers:
++    //     mismatch[k] = isLow[k] XOR isHigh[k-1]
++    //
++    // "isHigh of the previous code unit" is isHi8 advanced by one code unit, i.e. by
++    // two byte lanes. mvmd_dslli shifts the lanes and pulls the *previous pack's* top
++    // lanes into the vacated ones, so the first code unit's predecessor slot receives
++    // the incoming carry automatically -- the cross-pack carry needs no scalar bit.
++    Value * const prevHi = b.mvmd_dslli(8, isHi8, prevHiPhi, 2);
 +
-+    // Carry the high-surrogate status of this pack's last code unit.
-+    Value * const carryNext = b.CreateAnd(b.CreateLShr(hiBits, b.getInt64(HIGH_BYTE_POS)), i64ONE);
++    // ODD_ONE_MASK keeps only the high-byte position of each code unit and leaves a
++    // single set bit there, so one block popcount is exactly the number of ill-formed
++    // code units in this pack.
++    //
++    // This replaces the two hsimd_signmask(8) calls the previous version made here.
++    // On AArch64 that operation has no NEON lowering in IDISA and expanded to ~16
++    // lane extractions plus scalar bit assembly per call, which dominated the loop
++    // (see docs/simd_regression_investigation.md).
++    Value * const mismatch = b.simd_and(b.simd_xor(isLo8, prevHi), ODD_ONE_MASK);
++    Value * const markNext = b.CreateAdd(
++        markPhi, b.CreateZExtOrTrunc(b.bitblock_popcount(mismatch), sizeTy));
 +
 +    Value * const nextP = b.CreateAdd(p, ONE);
 +    p->addIncoming(nextP, b.GetInsertBlock());
-+    carryPhi->addIncoming(carryNext, b.GetInsertBlock());
++    prevHiPhi->addIncoming(isHi8, b.GetInsertBlock());   // this pack's mask carries forward
 +    markPhi->addIncoming(markNext, b.GetInsertBlock());
 +    b.CreateCondBr(b.CreateICmpNE(nextP, fullPacks), simdLoop, afterSIMD);
 +
 +    // --- After the SIMD loop: recover the carry (pending high) and marker count ---
 +    b.SetInsertPoint(afterSIMD);
-+    PHINode * const carryFinal = b.CreatePHI(i64Ty, 2);
++    PHINode * const carryFinal = b.CreatePHI(byteVecTy, 2);
 +    carryFinal->addIncoming(carryInit, entry);       // fullPacks == 0 -> carry is pendIn
-+    carryFinal->addIncoming(carryNext, simdLoop);    // else -> last pack's last unit
++    carryFinal->addIncoming(isHi8, simdLoop);        // else -> last pack's high-surrogate mask
 +    PHINode * const markFinal = b.CreatePHI(sizeTy, 2);
 +    markFinal->addIncoming(ZERO, entry);
 +    markFinal->addIncoming(markNext, simdLoop);
-+    Value * const carryBool = b.CreateICmpNE(carryFinal, i64ZERO);
++
++    // The pending-high state is the high-surrogate flag of the last complete code unit,
++    // i.e. the last high-byte lane of the final pack's mask. This is the only lane
++    // extraction in the whole SIMD path, and it happens once per invocation -- not once
++    // per pack.
++    Value * const lastHiByte = b.mvmd_extract(8, carryFinal, HIGH_BYTE_POS);
++    Value * const carryBool = b.CreateICmpNE(lastHiByte, ConstantInt::get(i8Ty, 0));
 +
 +    // --- Scalar tail: complete code units after the last full SIMD pack ---
 +    // Byte-oriented like the fast path: read the high byte at offset 2*idx+1 (LE)
