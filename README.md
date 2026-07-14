@@ -288,6 +288,11 @@ Outputs:
 Results are **machine-specific and preliminary**; no speedup is claimed here.
 Numbers should be read from a generated summary on the machine that produced them.
 
+A design study for future error-location and repair work — mapping Parabix's existing
+`TwoLevelScanKernel` (LLmask / maskHL sparse scanning) onto UTF-16 — is in
+[`docs/two_level_scan_design.md`](docs/two_level_scan_design.md). It is a **design
+artifact only**: no LLmask generator, scan kernel, or repair is implemented.
+
 Thread scaling is analysed in [`docs/threading_analysis.md`](docs/threading_analysis.md)
 (helper: `benchmarks/analyze_thread_scaling.py`). **Note:** that analysis found that the
 current byte-oriented SIMD kernel is slower than the committed summary reports, so the
