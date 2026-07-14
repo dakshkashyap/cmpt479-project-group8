@@ -305,10 +305,22 @@ measured in [`docs/llmask_generation_prototype.md`](docs/llmask_generation_proto
 ```
 
 This compares four LLmask generation strategies (`benchmarks/prototype_llmask_generation.cpp`,
-checked against `benchmarks/llmask_reference.py`). It is a **standalone prototype**: it is not a
-Parabix kernel, the validator is unchanged, and there is no maskHL aggregation and no repair.
-Its throughput figures are microbenchmarks on an in-memory buffer and are **not** comparable to
-the end-to-end validator numbers below.
+checked against `benchmarks/llmask_reference.py`).
+
+The second level — aggregating 64 LLmasks into one 64-bit **maskHL**, so a clean 4096-code-unit
+region can be skipped with a single compare — is prototyped and measured in
+[`docs/maskhl_aggregation_prototype.md`](docs/maskhl_aggregation_prototype.md):
+
+```bash
+./scripts/run_maskhl_prototype.sh     # self-test, maskHL invariants, validator cross-check,
+                                      # skip-rate sweep, and an aggregation-cost benchmark
+```
+
+Both are **standalone prototypes**: they are not Parabix kernels, the production validator is
+unchanged, and there is **no `TwoLevelScanKernel` subclass and no repair**. Their throughput
+figures are microbenchmarks on an in-memory buffer and are **not** comparable to the end-to-end
+validator numbers below. The LLmask generation core they share lives in
+`benchmarks/llmask_generation.h`.
 
 Thread scaling is analysed in [`docs/threading_analysis.md`](docs/threading_analysis.md)
 (helper: `benchmarks/analyze_thread_scaling.py`). **Note:** that analysis found that the
