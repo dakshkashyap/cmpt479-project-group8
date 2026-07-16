@@ -355,6 +355,18 @@ The optimized **count-only validator and the issue #32 producer are untouched** 
 and the count-only path remains the default, so this cannot regress it. There is still **no
 repair**.
 
+**UTF-16BE** is supported on every path via `--be` (UTF-16LE stays the default and unchanged) —
+see [`docs/utf16be_support.md`](docs/utf16be_support.md):
+
+```bash
+utf16validate --be --simd FILE                              # BE count-only
+utf16validate --be --emit-error-marks --scan-error-marks -thread-num=1 FILE  # BE locate
+./scripts/test_utf16be.sh                                   # 35/35, incl. cross-endian identity
+```
+
+Endianness only changes which byte of each pair is the high byte (`2k` for BE, `2k+1` for LE);
+the scan consumer is endian-agnostic (it works on code-unit positions).
+
 Thread scaling is analysed in [`docs/threading_analysis.md`](docs/threading_analysis.md)
 (helper: `benchmarks/analyze_thread_scaling.py`). **Note:** that analysis found that the
 current byte-oriented SIMD kernel is slower than the committed summary reports, so the
