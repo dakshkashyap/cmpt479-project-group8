@@ -341,9 +341,19 @@ utf16validate --emit-error-marks --print-positions FILE # print each ill-formed 
 ./scripts/test_errormarks.sh                            # 49/49: count + stream, 4 segment sizes
 ```
 
-The optimized **count-only validator is untouched** (both existing kernels are byte-identical)
-and remains the default, so this cannot regress it. There is still **no `TwoLevelScanKernel`
-subclass and no repair**.
+The **consumer** is a real subclass of Parabix's `TwoLevelScanKernel`,
+`UTF16ErrorMarkScanKernel`, which builds a high-level index, **skips clean 4096-code-unit
+regions**, and scans only dirty scanwords to report exact error positions — see
+[`docs/two_level_scan_consumer.md`](docs/two_level_scan_consumer.md):
+
+```bash
+utf16validate --emit-error-marks --scan-error-marks -thread-num=1 FILE  # two-level scan → positions
+./scripts/test_scan_consumer.sh                                         # 54/54, incl. stride skips
+```
+
+The optimized **count-only validator and the issue #32 producer are untouched** (byte-identical)
+and the count-only path remains the default, so this cannot regress it. There is still **no
+repair**.
 
 Thread scaling is analysed in [`docs/threading_analysis.md`](docs/threading_analysis.md)
 (helper: `benchmarks/analyze_thread_scaling.py`). **Note:** that analysis found that the

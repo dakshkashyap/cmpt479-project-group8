@@ -359,10 +359,18 @@ grep -rn "CreateCountForwardZeroes\|CreateResetLowestBit" .deps/parabix/include/
    kernel's emitted positions are **identical to the prototypes on 32 MiB (2208/2208)**, and
    emitting the stream costs only **~5-8% per byte** over counting alone. Producing the
    bitstream — long flagged as the project's main remaining risk — is done.
-3. Subclass `TwoLevelScanKernel` over `errorMarks` to *locate* errors while skipping clean
-   regions (report positions only — still no repair). Validate positions against the Python
-   reference, which already knows exactly where every injected error is (issue #23 generators).
-   **This is now the only missing piece**: the producer exists (issue #32) and the consumer was
-   measured as effectively free (issue #31).
-4. Define the repair policy in writing (§5) **before** writing repair code.
+3. ~~**Subclass `TwoLevelScanKernel` over `errorMarks` to locate errors**~~ — **done in issue
+   #39**; see [`two_level_scan_consumer.md`](two_level_scan_consumer.md). A real
+   `UTF16ErrorMarkScanKernel` **directly subclasses** Parabix's `TwoLevelScanKernel` (empty
+   `LoopVar`s; the leaf action prints the position), behind `--scan-error-marks`, so the maskHL
+   build, the clean-region skip (`CreateLikelyCondBr`) and the ctz/reset-lowest-bit scan are the
+   framework's own code. Positions are **byte-identical to the prototype and to the #32 linear
+   printer on 32 MiB (2208/2208/2208)** and across scan-stride boundaries at 4096/8192. One
+   honest correction to issue #31's "effectively free": in the real kernel the scan adds
+   **~4-7% on clean data**, because `generateIndexComputation` builds maskHL over *every* block
+   before the skip can fire — the skip avoids scanword *processing*, not index *construction*, so
+   the index-building floor is paid on every byte. The per-error scan is still negligible.
+   **The full locate pipeline now exists end-to-end in real Parabix.**
+4. Define the repair policy in writing (§5) **before** writing repair code. This — plus a kernel
+   that acts on the located positions instead of printing them — is the only remaining gap.
 5. Only then implement repair.

@@ -1,30 +1,9 @@
-diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 347226c3..01081b12 100644
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -93,7 +93,7 @@ message(STATUS "LLVM Version Integer: ${LLVM_VERSION_INTEGER}")
- set(Boost_USE_STATIC_LIBS ${USE_STATIC_LIBS})
- set(Boost_USE_MULTITHREADED OFF)
- set(Boost_USE_STATIC_RUNTIME OFF)
--find_package(Boost 1.61 REQUIRED COMPONENTS system filesystem iostreams regex)
-+find_package(Boost 1.61 REQUIRED COMPONENTS filesystem iostreams regex)
- message(STATUS "Found Boost_LIBRARY_DIRS: ${Boost_LIBRARY_DIRS}")
- include_directories("${Boost_INCLUDE_DIRS}")
- link_directories(${Boost_LIBRARY_DIRS})
-@@ -434,6 +434,7 @@ if (GENERATE_TOOLS)
-     add_subdirectory(tools/audio)
-     add_subdirectory(tools/util)
-     add_subdirectory(tools/csv)
-+    add_subdirectory(tools/utf16validate)
- endif()
- 
- # Kernel Tests
 diff --git a/tools/utf16validate/CMakeLists.txt b/tools/utf16validate/CMakeLists.txt
 new file mode 100644
-index 00000000..9cd58967
+index 00000000..17157d57
 --- /dev/null
 +++ b/tools/utf16validate/CMakeLists.txt
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,15 @@
 +#  Part of the Parabix Project, under the Open Software License 3.0.
 +#  SPDX-License-Identifier: OSL-3.0
 +
@@ -38,13 +17,14 @@ index 00000000..9cd58967
 +DEPS
 +    kernel.core
 +    kernel.io
++    kernel.scan
 +)
 diff --git a/tools/utf16validate/utf16validate.cpp b/tools/utf16validate/utf16validate.cpp
 new file mode 100644
-index 00000000..9d8daef1
+index 00000000..d1fa0d22
 --- /dev/null
 +++ b/tools/utf16validate/utf16validate.cpp
-@@ -0,0 +1,925 @@
+@@ -0,0 +1,1010 @@
 +/*
 + *  Part of the Parabix Project, under the Open Software License 3.0.
 + *  SPDX-License-Identifier: OSL-3.0
@@ -57,6 +37,7 @@ index 00000000..9d8daef1
 +#include <kernel/core/kernel.h>
 +#include <kernel/core/kernel_builder.h>
 +#include <kernel/core/streamset.h>
++#include <kernel/scan/base.h>          // TwoLevelScanKernel (issue #39 consumer)
 +#include <llvm/IR/Constants.h>
 +#include <llvm/IR/DerivedTypes.h>
 +#include <llvm/Support/CommandLine.h>
@@ -94,10 +75,25 @@ index 00000000..9d8daef1
 +                                    cl::init(false), cl::cat(utf16validateOptions));
 +
 +// Prints the code-unit index of every set bit in errorMarks, so the emitted bitstream can be
-+// diffed against the standalone prototypes. Requires --emit-error-marks.
++// diffed against the standalone prototypes. Requires --emit-error-marks. This is the issue #32
++// DEBUG printer: a linear ErrorMarkPositionKernel that visits every block and skips nothing.
 +static cl::opt<bool> printPositions("print-positions",
 +                                    cl::desc("PROTOTYPE: with --emit-error-marks, print the "
-+                                             "code-unit position of every ill-formed unit."),
++                                             "code-unit position of every ill-formed unit "
++                                             "(issue #32 linear debug printer)."),
++                                    cl::init(false), cl::cat(utf16validateOptions));
++
++// PROTOTYPE (issue #39). Consumes errorMarks with a real subclass of Parabix's
++// TwoLevelScanKernel: it builds a high-level index (maskHL), SKIPS clean 4096-code-unit
++// regions with a single branch, and scans only dirty scanwords with ctz / reset-lowest-bit.
++// It prints the same "errpos = <hex>" lines as --print-positions (they are the same code-unit
++// positions), so both are diffable against benchmarks/llmask_reference.py --positions; the
++// difference is the SCAN STRATEGY, not the output. Requires --emit-error-marks. Implies a
++// producer + consumer pipeline.
++static cl::opt<bool> scanErrorMarks("scan-error-marks",
++                                    cl::desc("PROTOTYPE: with --emit-error-marks, locate errors "
++                                             "with a TwoLevelScanKernel subclass (skips clean "
++                                             "regions) and print their positions."),
 +                                    cl::init(false), cl::cat(utf16validateOptions));
 +
 +// ===========================================================================
@@ -922,6 +918,71 @@ index 00000000..9d8daef1
 +    b.SetInsertPoint(done);
 +}
 +
++// ===========================================================================
++// errorMarks consumer -- TwoLevelScanKernel subclass (issue #39).
++// ===========================================================================
++//
++// This is the real consumer side. It is a DIRECT SUBCLASS of Parabix's
++// TwoLevelScanKernel (include/kernel/scan/base.h), so the two-level scan
++// machinery -- high-level index (maskHL) construction, clean-region skipping,
++// and ctz / reset-lowest-bit scanning at both levels -- is Parabix's own code,
++// not a reimplementation. This kernel only supplies the leaf action: print the
++// code-unit position of each set bit.
++//
++// What the base class does for us (lib/kernel/scan/base.cpp:221-390):
++//   * generateIndexComputation builds, per stride, a size_t "maskHL" whose bit w
++//     is set iff scanword w of errorMarks is nonzero -- via simd_any(64, block)
++//     + hsimd_signmask(64, ...). At scanWordWidth=64 on a 128-bit block that is
++//     TWO lanes per block, so it does NOT hit the fw=8 signmask problem issue #38
++//     found on AArch64 (see docs/two_level_scan_design.md).
++//   * strideLogic does CreateLikelyCondBr(metaMask != 0, ...), so a stride whose
++//     maskHL is all-zero (a clean 4096-code-unit region) is skipped with a single
++//     branch; then CreateCountForwardZeroes walks only the dirty scanwords, and
++//     within each, only the set bits.
++//   * generateProcessingLogic is called once per set bit with the ABSOLUTE
++//     code-unit position (itemPos) already computed.
++//
++// scanWordWidth = 64: maxScanBlocks = 64 bits / (BITS/64 scanwords per block).
++// On a 128-bit block that is 32 blocks/stride = 64 scanwords x 64 bits = 4096
++// code units per stride -- exactly the region size from issues #30/#31.
++//
++// No loop variables are needed: locating positions is stateless, so the LoopVar
++// list is empty, initialize() is trivial, and wordPrologueLogic() is a no-op.
++//
++// It prints the same "errpos = <hex>" lines as the issue #32 debug printer -- the
++// positions are identical by construction -- so both are diffable against
++// benchmarks/llmask_reference.py --positions. The distinction is the SCAN
++// STRATEGY (this one skips clean regions; the #32 printer visits every block).
++// SideEffecting() is required, exactly as for the #32 printer: a kernel whose
++// only result is what it prints is otherwise considered dead and never scheduled
++// (attributes.h:280-284).
++class UTF16ErrorMarkScanKernel final : public TwoLevelScanKernel {
++public:
++    UTF16ErrorMarkScanKernel(LLVMTypeSystemInterface & ts, StreamSet * errorMarks)
++    : TwoLevelScanKernel(ts, "utf16errormarkscan", /*scanWordWidth*/ 64,
++                         /*scanStreamName*/ "errorMarks", /*loopVars*/ {}) {
++        mInputStreamSets.push_back(Binding{"errorMarks", errorMarks});
++        addAttribute(SideEffecting());
++    }
++protected:
++    void initialize(KernelBuilder & /* b */) override {
++        // No loop variables to seed.
++    }
++    void wordPrologueLogic(KernelBuilder & /* b */, llvm::Value * /* absWordPosition */,
++                           std::vector<llvm::Value *> /* indexWord */,
++                           std::vector<llvm::Value *> & /* loopVars */) override {
++        // Nothing to do once per dirty scanword; the leaf action is per set bit.
++    }
++    void generateProcessingLogic(KernelBuilder & b, llvm::Value * absItemPos,
++                                 std::vector<llvm::Value *> & /* loopVars */) override {
++        b.CallPrintInt("errpos", absItemPos, CBuilder::STD_FD::STD_OUT);
++    }
++    void finalize(KernelBuilder & /* b */,
++                  std::vector<llvm::Value *> & /* loopVarFinalValues */) override {
++        // Nothing to flush.
++    }
++};
++
 +typedef uint64_t (*utf16validateFunctionType)(const uint32_t fd);
 +
 +utf16validateFunctionType utf16validatePipelineGen(CPUDriver & driver) {
@@ -936,7 +997,11 @@ index 00000000..9d8daef1
 +        StreamSet * const ErrorMarks = P.CreateStreamSet(1);
 +        P.CreateKernelCall<UTF16ErrorMarksKernel>(ByteStream, ErrorMarks,
 +                                                  P.getOutputScalar("errorCount"));
-+        if (printPositions) {
++        if (scanErrorMarks) {
++            // Issue #39 consumer: a real TwoLevelScanKernel subclass that skips clean regions.
++            P.CreateKernelCall<UTF16ErrorMarkScanKernel>(ErrorMarks);
++        } else if (printPositions) {
++            // Issue #32 linear debug printer (visits every block).
 +            P.CreateKernelCall<ErrorMarkPositionKernel>(ErrorMarks);
 +        }
 +    } else if (useSIMD) {
