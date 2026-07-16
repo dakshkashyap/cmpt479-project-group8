@@ -21,10 +21,10 @@ index 00000000..17157d57
 +)
 diff --git a/tools/utf16validate/utf16validate.cpp b/tools/utf16validate/utf16validate.cpp
 new file mode 100644
-index 00000000..d1fa0d22
+index 00000000..bf2ac4ce
 --- /dev/null
 +++ b/tools/utf16validate/utf16validate.cpp
-@@ -0,0 +1,1010 @@
+@@ -0,0 +1,1049 @@
 +/*
 + *  Part of the Parabix Project, under the Open Software License 3.0.
 + *  SPDX-License-Identifier: OSL-3.0
@@ -61,8 +61,15 @@ index 00000000..d1fa0d22
 +// (uint64_t(*)(uint32_t fd)) and print identical output; --simd only switches
 +// which kernels are wired together, so the scalar kernel remains a byte-identical
 +// differential oracle.
-+static cl::opt<bool> useSIMD("simd", cl::desc("Use the SIMD UTF-16LE validator (default: scalar)."),
++static cl::opt<bool> useSIMD("simd", cl::desc("Use the SIMD UTF-16 validator (default: scalar)."),
 +                             cl::init(false), cl::cat(utf16validateOptions));
++
++// Select UTF-16BE input. Default is UTF-16LE, unchanged. Endianness only changes which byte
++// of each code-unit pair is the high byte (2k for BE, 2k+1 for LE); every validator/producer
++// path honours it, and the errorMarks scan consumer is endian-agnostic (it works on code-unit
++// positions). See docs/utf16be_support.md.
++static cl::opt<bool> bigEndian("be", cl::desc("Validate UTF-16BE input (default: UTF-16LE)."),
++                               cl::init(false), cl::cat(utf16validateOptions));
 +
 +// PROTOTYPE (issue #32). Selects the errorMarks producer pipeline instead of a count-only
 +// one: the kernel emits a real StreamSet(1) bitstream with one bit per UTF-16 code unit,
@@ -121,13 +128,16 @@ index 00000000..d1fa0d22
 +// See docs/SIMD_BYTE_ORIENTED_VALIDATOR.md for the byte-oriented design.
 +class UTF16ValidatorKernel final : public MultiBlockKernel {
 +public:
-+    UTF16ValidatorKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream, Scalar * errorCount);
++    UTF16ValidatorKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream, Scalar * errorCount,
++                         bool bigEndian = false);
 +private:
 +    void generateMultiBlockLogic(KernelBuilder & b, llvm::Value * const numOfStrides) override;
++    const bool mBigEndian;
 +};
 +
-+UTF16ValidatorKernel::UTF16ValidatorKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream, Scalar * errorCount)
-+: MultiBlockKernel(ts, "utf16validate",
++UTF16ValidatorKernel::UTF16ValidatorKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream, Scalar * errorCount,
++                                           bool bigEndian)
++: MultiBlockKernel(ts, bigEndian ? "utf16validate_be" : "utf16validate",
 +// input stream: raw bytes (each UTF-16 code unit is two consecutive bytes).
 +// Linear() guarantees the accessible bytes are contiguous for a serial walk.
 +{Binding{"byteStream", byteStream, FixedRate(1), Linear()}},
@@ -139,7 +149,8 @@ index 00000000..d1fa0d22
 +{Binding{"errorCount", errorCount}},
 +// internal (persistent) scalars carried across segments
 +{InternalScalar{ts.getSizeTy(), "errAccum"},
-+ InternalScalar{ts.getInt1Ty(), "pendingHigh"}}) {
++ InternalScalar{ts.getInt1Ty(), "pendingHigh"}})
++, mBigEndian(bigEndian) {
 +
 +}
 +
@@ -178,7 +189,14 @@ index 00000000..d1fa0d22
 +    err->addIncoming(errIn, entry);
 +    pend->addIncoming(pendIn, entry);
 +
-+    Value * const unit = b.CreateLoad(i16Ty, b.CreateGEP(i16Ty, u16base, idx));
++    // The raw i16 load is in host order (little-endian on our targets), so it is the true
++    // code unit for UTF-16LE data. For UTF-16BE data the bytes are swapped, so byte-swap the
++    // loaded value to recover the code unit; the identical range checks then follow. The LE
++    // path is byte-for-byte unchanged.
++    Value * const rawUnit = b.CreateLoad(i16Ty, b.CreateGEP(i16Ty, u16base, idx));
++    Value * const unit = mBigEndian
++        ? b.CreateUnaryIntrinsic(Intrinsic::bswap, rawUnit)
++        : rawUnit;
 +    Value * const isHigh = b.CreateAnd(b.CreateICmpUGE(unit, b.getInt16(0xD800)),
 +                                       b.CreateICmpULE(unit, b.getInt16(0xDBFF)));
 +    Value * const isLow  = b.CreateAnd(b.CreateICmpUGE(unit, b.getInt16(0xDC00)),
@@ -275,13 +293,16 @@ index 00000000..d1fa0d22
 +// unmatched high surrogate?) threads across packs, blocks and segments.
 +class UTF16ValidatorSIMDKernel final : public MultiBlockKernel {
 +public:
-+    UTF16ValidatorSIMDKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream, Scalar * errorCount);
++    UTF16ValidatorSIMDKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream, Scalar * errorCount,
++                             bool bigEndian = false);
 +private:
 +    void generateMultiBlockLogic(KernelBuilder & b, llvm::Value * const numOfStrides) override;
++    const bool mBigEndian;
 +};
 +
-+UTF16ValidatorSIMDKernel::UTF16ValidatorSIMDKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream, Scalar * errorCount)
-+: MultiBlockKernel(ts, "utf16validateSIMD",
++UTF16ValidatorSIMDKernel::UTF16ValidatorSIMDKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream, Scalar * errorCount,
++                                                   bool bigEndian)
++: MultiBlockKernel(ts, bigEndian ? "utf16validateSIMD_be" : "utf16validateSIMD",
 +// input: raw bytes, 2 per code unit. Linear() lets the scalar tail walk raw, and
 +// the SIMD fast path reads full blocks via loadInputStreamPack.
 +{Binding{"byteStream", byteStream, FixedRate(1), Linear()}},
@@ -296,7 +317,8 @@ index 00000000..d1fa0d22
 +//   errAccum    -- running total (full-block marker popcounts + scalar-tail
 +//                  errors) across segments, WITHOUT the EOF adjustments
 +{InternalScalar{ts.getInt1Ty(), "pendingHigh"},
-+ InternalScalar{ts.getSizeTy(), "errAccum"}}) {
++ InternalScalar{ts.getSizeTy(), "errAccum"}})
++, mBigEndian(bigEndian) {
 +
 +}
 +
@@ -305,27 +327,31 @@ index 00000000..d1fa0d22
 +    Type * const i1Ty = b.getInt1Ty();
 +    Type * const i8Ty = b.getInt8Ty();
 +
++    // High-byte lane offset within a code unit: UTF-16LE puts the high byte at the ODD
++    // byte position (2k+1), UTF-16BE at the EVEN position (2k). Everything endian-specific
++    // in this kernel reduces to this one offset. LE (HB=1) is byte-for-byte unchanged.
++    const unsigned HB = mBigEndian ? 0u : 1u;
++
 +    const unsigned BITS = b.getBitBlockWidth();
 +    const unsigned BYTES_PER_PACK = BITS / 8;           // bytes in one SIMD pack
 +    const unsigned UNITS_PER_PACK = BITS / 16;          // complete UTF-16 code units per pack
-+    const unsigned HIGH_BYTE_POS = BYTES_PER_PACK - 1;  // last high-byte position in a pack (LE)
++    const unsigned HIGH_BYTE_POS = BYTES_PER_PACK - 2 + HB;  // last high-byte lane in a pack
 +
 +    // Byte-lane vector type for one pack. The whole pairing check stays in this type:
 +    // nothing is extracted to a scalar bitmask inside the loop.
 +    FixedVectorType * const byteVecTy = FixedVectorType::get(i8Ty, BYTES_PER_PACK);
 +
-+    // ODD_ONE_MASK selects the high-byte position of every code unit. For UTF-16LE
-+    // the high byte of code unit k is memory byte 2k+1 -- the odd byte positions
-+    // 1, 3, 5, ..., BYTES_PER_PACK-1. Selecting by *position* (not by host lane
-+    // significance) is what makes the classification host-endian agnostic;
-+    // UTF-16BE support would only flip this to the even positions.
++    // ODD_ONE_MASK selects the high-byte position of every code unit: memory byte 2k+HB,
++    // i.e. the odd positions for UTF-16LE (HB=1) or the even positions for UTF-16BE (HB=0).
++    // Selecting by *position* (not by host lane significance) is what makes the
++    // classification host-endian agnostic.
 +    //
 +    // It leaves a single set bit (0x01) at each selected position rather than a full
 +    // 0xFF byte, so one block popcount of the masked mismatch vector is exactly the
 +    // number of ill-formed code units -- no per-byte mask extraction is needed.
 +    std::vector<Constant *> oddLanes(BYTES_PER_PACK);
 +    for (unsigned pos = 0; pos < BYTES_PER_PACK; ++pos) {
-+        oddLanes[pos] = ConstantInt::get(i8Ty, (pos & 1u) ? 0x01 : 0x00);
++        oddLanes[pos] = ConstantInt::get(i8Ty, ((pos & 1u) == HB) ? 0x01 : 0x00);
 +    }
 +    Constant * const ODD_ONE_MASK = ConstantVector::get(oddLanes);
 +
@@ -450,7 +476,7 @@ index 00000000..d1fa0d22
 +    tErr->addIncoming(ZERO, afterSIMD);
 +    pend->addIncoming(carryBool, afterSIMD);
 +
-+    Value * const hiOff = b.CreateAdd(b.CreateShl(idx, ONE), ONE);   // 2*idx + 1 (LE high byte)
++    Value * const hiOff = b.CreateAdd(b.CreateShl(idx, ONE), b.getSize(HB));  // 2*idx + HB (high byte)
 +    Value * const hiByte = b.CreateLoad(i8Ty, b.CreateGEP(i8Ty, i8base, hiOff));
 +    Value * const tMasked = b.CreateAnd(hiByte, b.getInt8(0xFC));
 +    Value * const tIsHigh = b.CreateICmpEQ(tMasked, b.getInt8(0xD8));
@@ -550,14 +576,15 @@ index 00000000..d1fa0d22
 +class UTF16ErrorMarksKernel final : public MultiBlockKernel {
 +public:
 +    UTF16ErrorMarksKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream,
-+                          StreamSet * errorMarks, Scalar * errorCount);
++                          StreamSet * errorMarks, Scalar * errorCount, bool bigEndian = false);
 +private:
 +    void generateMultiBlockLogic(KernelBuilder & b, llvm::Value * const numOfStrides) override;
++    const bool mBigEndian;
 +};
 +
 +UTF16ErrorMarksKernel::UTF16ErrorMarksKernel(LLVMTypeSystemInterface & ts, StreamSet * byteStream,
-+                                             StreamSet * errorMarks, Scalar * errorCount)
-+: MultiBlockKernel(ts, "utf16errormarks",
++                                             StreamSet * errorMarks, Scalar * errorCount, bool bigEndian)
++: MultiBlockKernel(ts, bigEndian ? "utf16errormarks_be" : "utf16errormarks",
 +// input: raw bytes, 2 per code unit. FixedRate(2) against the FixedRate(1) output gives
 +// accessible(bytes) == 2 * writable(marks). Linear() for the raw byte reads; LookAhead(2)
 +// for the k+1 term of the marker rule.
@@ -570,7 +597,8 @@ index 00000000..d1fa0d22
 +{Binding{"errorCount", errorCount}},
 +// internal (persistent) scalars carried across segments
 +{InternalScalar{ts.getInt1Ty(), "pendingHigh"},
-+ InternalScalar{ts.getSizeTy(), "errAccum"}}) {
++ InternalScalar{ts.getSizeTy(), "errAccum"}})
++, mBigEndian(bigEndian) {
 +
 +}
 +
@@ -580,10 +608,14 @@ index 00000000..d1fa0d22
 +    Type * const i8Ty = b.getInt8Ty();
 +    Type * const i64Ty = b.getInt64Ty();
 +
++    // High-byte lane offset within a code unit: 2k+1 for UTF-16LE (HB=1), 2k for UTF-16BE
++    // (HB=0). Every endian-specific quantity below reduces to this offset. LE is unchanged.
++    const unsigned HB = mBigEndian ? 0u : 1u;
++
 +    const unsigned BITS = b.getBitBlockWidth();
 +    const unsigned BYTES_PER_PACK = BITS / 8;              // bytes in one SIMD pack
 +    const unsigned UNITS_PER_PACK = BITS / 16;             // code units per pack
-+    const unsigned HIGH_BYTE_POS = BYTES_PER_PACK - 1;     // last high-byte lane of a pack (LE)
++    const unsigned HIGH_BYTE_POS = BYTES_PER_PACK - 2 + HB;   // last high-byte lane of a pack
 +    const unsigned LANES_PER_PACK = BYTES_PER_PACK / 8;    // 64-bit lanes in a pack
 +    const unsigned WORDS_PER_BLOCK = BITS / 64;            // 64-bit words in one marker block
 +    // One marker block holds BITS code units == 2*BITS bytes == 16 packs, for every BITS.
@@ -593,13 +625,14 @@ index 00000000..d1fa0d22
 +    FixedVectorType * const wordVecTy = FixedVectorType::get(i64Ty, WORDS_PER_BLOCK);
 +
 +    // WEIGHTS: at the high-byte lane of each code unit, the bit that code unit owns within
-+    // its 64-bit lane. Byte lane 8L+2j+1 (code unit 4L+j) gets weight 1<<j, j in [0,4).
-+    // Even (low-byte) lanes get 0, which also masks off the garbage that the fw=8 compares
-+    // leave there -- a low byte can coincidentally equal 0xD8/0xDC (e.g. code unit 0x00D8).
++    // its 64-bit lane. Byte lane 8L+2j+HB (code unit 4L+j) gets weight 1<<j, j in [0,4).
++    // The other-parity (low-byte) lanes get 0, which also masks off the garbage that the fw=8
++    // compares leave there -- a low byte can coincidentally equal 0xD8/0xDC (e.g. 0x00D8).
 +    std::vector<Constant *> weightLanes(BYTES_PER_PACK);
 +    for (unsigned pos = 0; pos < BYTES_PER_PACK; ++pos) {
-+        const unsigned j = ((pos % 8) - 1) / 2;            // only meaningful for odd pos
-+        weightLanes[pos] = ConstantInt::get(i8Ty, (pos & 1u) ? (1u << j) : 0u);
++        const bool isHighLane = (pos & 1u) == HB;
++        const unsigned j = ((pos % 8) - HB) / 2;           // only meaningful for high-byte lanes
++        weightLanes[pos] = ConstantInt::get(i8Ty, isHighLane ? (1u << j) : 0u);
 +    }
 +    Constant * const WEIGHTS = ConstantVector::get(weightLanes);
 +
@@ -665,19 +698,21 @@ index 00000000..d1fa0d22
 +        // nextLow[k] = isLow[k+1 code unit] = isLo8 shifted DOWN by two byte lanes. Only the
 +        // LAST high-byte lane needs data from beyond this pack, and it needs exactly ONE byte:
 +        // the high byte of the next pack's first code unit, at raw offset
-+        // (P+1)*BYTES_PER_PACK + 1. That is at most `avail + 1`, which LookAhead(2) covers --
++        // (P+1)*BYTES_PER_PACK + HB. That is at most `avail + 1`, which LookAhead(2) covers --
 +        // and which the pipeline zero-fills on the final call, so a trailing high surrogate
 +        // marks itself with no EOF special case.
 +        Value * const laOff = b.CreateAdd(b.CreateMul(b.CreateAdd(P, ONE),
-+                                                      b.getSize(BYTES_PER_PACK)), ONE);
++                                                      b.getSize(BYTES_PER_PACK)), b.getSize(HB));
 +        Value * const laByte = b.CreateLoad(i8Ty, b.CreateGEP(i8Ty, i8base, laOff));
 +        Value * const laIsLow = b.CreateICmpEQ(b.CreateAnd(laByte, b.getInt8(0xFC)),
 +                                               b.getInt8(0xDC));
-+        Value * const laVec = b.CreateInsertElement(ConstantAggregateZero::get(byteVecTy),
-+                                                    b.CreateSExt(laIsLow, i8Ty), b.getInt32(1));
 +        // mvmd_dslli(fw, a, b, s): result[i] = a[i-s] for i>=s, else b[fieldCount-s+i].
 +        // With s = BYTES_PER_PACK-2: result[i] = isLo8[i+2] for i < BYTES_PER_PACK-2, and the
-+        // top two lanes come from laVec[0], laVec[1] -- laVec[1] being the byte we just read.
++        // top two lanes [BYTES_PER_PACK-2, BYTES_PER_PACK-1] come from laVec[0], laVec[1].
++        // The high-byte lane of the last code unit is BYTES_PER_PACK-2+HB, which reads
++        // laVec[HB] -- so the lookahead byte is inserted at lane HB.
++        Value * const laVec = b.CreateInsertElement(ConstantAggregateZero::get(byteVecTy),
++                                                    b.CreateSExt(laIsLow, i8Ty), b.getInt32(HB));
 +        Value * const nextLo = b.mvmd_dslli(8, laVec, isLo8, BYTES_PER_PACK - 2);
 +
 +        // bad[k] = (isLow[k] & !isHigh[k-1]) | (isHigh[k] & !isLow[k+1])
@@ -753,9 +788,9 @@ index 00000000..d1fa0d22
 +    tErr->addIncoming(ZERO, afterBlocks);
 +    pend->addIncoming(carryBool, afterBlocks);
 +
-+    // High byte of code unit idx (2*idx+1) and of code unit idx+1 (2*idx+3). The latter is at
-+    // most avail+1, inside the LookAhead(2) region, and zero at EOF.
-+    Value * const hiOff = b.CreateAdd(b.CreateShl(idx, ONE), ONE);
++    // High byte of code unit idx (2*idx+HB) and of code unit idx+1 (2*idx+HB+2). The latter is
++    // at most avail+1, inside the LookAhead(2) region, and zero at EOF.
++    Value * const hiOff = b.CreateAdd(b.CreateShl(idx, ONE), b.getSize(HB));
 +    Value * const hiByte = b.CreateLoad(i8Ty, b.CreateGEP(i8Ty, i8base, hiOff));
 +    Value * const nxByte = b.CreateLoad(i8Ty, b.CreateGEP(i8Ty, i8base,
 +                                                          b.CreateAdd(hiOff, b.getSize(2))));
@@ -996,9 +1031,11 @@ index 00000000..d1fa0d22
 +        // kernels above are untouched and are still what --simd and the default select.
 +        StreamSet * const ErrorMarks = P.CreateStreamSet(1);
 +        P.CreateKernelCall<UTF16ErrorMarksKernel>(ByteStream, ErrorMarks,
-+                                                  P.getOutputScalar("errorCount"));
++                                                  P.getOutputScalar("errorCount"), bigEndian);
 +        if (scanErrorMarks) {
 +            // Issue #39 consumer: a real TwoLevelScanKernel subclass that skips clean regions.
++            // Endian-agnostic -- it scans the code-unit-indexed errorMarks bitstream, which the
++            // producer has already made endian-correct.
 +            P.CreateKernelCall<UTF16ErrorMarkScanKernel>(ErrorMarks);
 +        } else if (printPositions) {
 +            // Issue #32 linear debug printer (visits every block).
@@ -1006,10 +1043,12 @@ index 00000000..d1fa0d22
 +        }
 +    } else if (useSIMD) {
 +        // SIMD path: one self-contained kernel produces errorCount directly.
-+        P.CreateKernelCall<UTF16ValidatorSIMDKernel>(ByteStream, P.getOutputScalar("errorCount"));
++        P.CreateKernelCall<UTF16ValidatorSIMDKernel>(ByteStream, P.getOutputScalar("errorCount"),
++                                                     bigEndian);
 +    } else {
-+        // Scalar oracle path (default), unchanged.
-+        P.CreateKernelCall<UTF16ValidatorKernel>(ByteStream, P.getOutputScalar("errorCount"));
++        // Scalar oracle path (default).
++        P.CreateKernelCall<UTF16ValidatorKernel>(ByteStream, P.getOutputScalar("errorCount"),
++                                                 bigEndian);
 +    }
 +    return reinterpret_cast<utf16validateFunctionType>(P.compile());
 +}

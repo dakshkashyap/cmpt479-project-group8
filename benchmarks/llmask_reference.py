@@ -32,15 +32,21 @@ HIGH_LO, HIGH_HI = 0xD800, 0xDBFF
 LOW_LO, LOW_HI = 0xDC00, 0xDFFF
 
 
-def llmasks(data):
-    """Return (masks, units, error_bits, odd_trailing_byte) for raw UTF-16LE bytes."""
+def code_units(data, big_endian):
+    """Code unit values from raw bytes (never via a codec: Python's codecs refuse to decode
+    lone surrogates). UTF-16LE puts the high byte at 2k+1; UTF-16BE at 2k."""
+    units = len(data) // 2
+    if big_endian:
+        return [(data[2 * k] << 8) | data[2 * k + 1] for k in range(units)]
+    return [data[2 * k] | (data[2 * k + 1] << 8) for k in range(units)]
+
+
+def llmasks(data, big_endian=False):
+    """Return (masks, units, error_bits, odd_trailing_byte) for raw UTF-16 bytes."""
     n = len(data)
     odd = n & 1
     units = n // 2
-
-    # Code unit values, little-endian, built from the raw bytes (never via a codec:
-    # Python's codecs refuse to decode lone surrogates).
-    values = [data[2 * k] | (data[2 * k + 1] << 8) for k in range(units)]
+    values = code_units(data, big_endian)
 
     def is_high(k):
         return 0 <= k < units and HIGH_LO <= values[k] <= HIGH_HI
@@ -59,7 +65,7 @@ def llmasks(data):
     return masks, units, error_bits, odd
 
 
-def error_positions(data):
+def error_positions(data, big_endian=False):
     """Return (positions, units, odd_trailing_byte): the code-unit index of every
     ill-formed code unit, in ascending order.
 
@@ -71,7 +77,7 @@ def error_positions(data):
     n = len(data)
     odd = n & 1
     units = n // 2
-    values = [data[2 * k] | (data[2 * k + 1] << 8) for k in range(units)]
+    values = code_units(data, big_endian)
 
     def is_high(k):
         return 0 <= k < units and HIGH_LO <= values[k] <= HIGH_HI
@@ -116,18 +122,23 @@ def main():
                       help="print the canonical error-position list (diffable against the "
                            "error-position scan prototype's --dump)")
     mode.add_argument("--check", metavar="FILE", help="print a one-line summary")
+    ap.add_argument("--endian", choices=("le", "be"), default="le",
+                    help="byte order of the input (default: le)")
+    ap.add_argument("--be", action="store_const", const="be", dest="endian",
+                    help="shorthand for --endian be")
     args = ap.parse_args()
+    big_endian = args.endian == "be"
 
     path = args.dump or args.positions or args.check
     with open(path, "rb") as f:
         data = f.read()
 
     if args.positions:
-        positions, units, odd = error_positions(data)
+        positions, units, odd = error_positions(data, big_endian)
         dump_positions(positions, units, odd, sys.stdout)
         return 0
 
-    masks, units, error_bits, odd = llmasks(data)
+    masks, units, error_bits, odd = llmasks(data, big_endian)
     if args.dump:
         dump(masks, units, error_bits, odd, sys.stdout)
     else:
