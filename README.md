@@ -367,6 +367,13 @@ utf16validate --be --emit-error-marks --scan-error-marks -thread-num=1 FILE  # B
 Endianness only changes which byte of each pair is the high byte (`2k` for BE, `2k+1` for LE);
 the scan consumer is endian-agnostic (it works on code-unit positions).
 
+A bitwise/**Pablo** validation path was investigated and **deliberately not adopted** — see
+[`docs/pablo_utf16_prototype.md`](docs/pablo_utf16_prototype.md). A real Pablo pipeline (S2P
+transposition + `PabloKernel`) was built and ran, but Parabix has no bytes→16-code-unit-indexed
+basis transpose, and transposition is a full extra pass with no benefit for a predicate as simple
+as a single high-byte surrogate compare. This confirms the expectation that transposition
+overhead dominates; the tool is unchanged (no `--pablo` mode shipped).
+
 Thread scaling is analysed in [`docs/threading_analysis.md`](docs/threading_analysis.md)
 (helper: `benchmarks/analyze_thread_scaling.py`). **Note:** that analysis found that the
 current byte-oriented SIMD kernel is slower than the committed summary reports, so the
