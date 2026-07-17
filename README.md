@@ -35,7 +35,10 @@ Only verified results are listed here:
   trailing byte after a large input).
 - Forced segment-size tests (`-segment-size=1,13,64`) pass.
 - A reproducible preliminary scalar/SIMD/thread-count benchmark is available.
-- The full performance evaluation and Clausecker–Lemire comparison are still pending.
+- Cross-architecture evaluation: **CSIL x86-64 is done**
+  (`results/utf16_benchmark_csil_x86_64_summary.md`); **Apple arm64** is the
+  teammate's matching run. Shared runbook:
+  [`docs/cross_arch_evaluation.md`](docs/cross_arch_evaluation.md).
 
 ## Repository layout
 
