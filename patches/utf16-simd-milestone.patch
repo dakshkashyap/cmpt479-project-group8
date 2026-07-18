@@ -1,3 +1,24 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 347226c3..01081b12 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -93,7 +93,7 @@ message(STATUS "LLVM Version Integer: ${LLVM_VERSION_INTEGER}")
+ set(Boost_USE_STATIC_LIBS ${USE_STATIC_LIBS})
+ set(Boost_USE_MULTITHREADED OFF)
+ set(Boost_USE_STATIC_RUNTIME OFF)
+-find_package(Boost 1.61 REQUIRED COMPONENTS system filesystem iostreams regex)
++find_package(Boost 1.61 REQUIRED COMPONENTS filesystem iostreams regex)
+ message(STATUS "Found Boost_LIBRARY_DIRS: ${Boost_LIBRARY_DIRS}")
+ include_directories("${Boost_INCLUDE_DIRS}")
+ link_directories(${Boost_LIBRARY_DIRS})
+@@ -434,6 +434,7 @@ if (GENERATE_TOOLS)
+     add_subdirectory(tools/audio)
+     add_subdirectory(tools/util)
+     add_subdirectory(tools/csv)
++    add_subdirectory(tools/utf16validate)
+ endif()
+ 
+ # Kernel Tests
 diff --git a/tools/utf16validate/CMakeLists.txt b/tools/utf16validate/CMakeLists.txt
 new file mode 100644
 index 00000000..17157d57

@@ -222,6 +222,9 @@ def parse_datasets(text):
         if not part:
             continue
         if part == "all":
+            # Keep in sync with benchmarks/run_utf16_benchmark.py DATASETS:
+            # default synthetic mix + every multilingual mode.
+            names.append(DEFAULT_MODE)
             names.extend(MODES.keys())
         elif part == DEFAULT_MODE or part in MODES:
             names.append(part)
@@ -596,8 +599,8 @@ def main():
     parser.add_argument("--sizes-mb", default="1,8,32,64",
                         help="comma-separated sizes in MiB (default: 1,8,32,64)")
     parser.add_argument("--datasets", default=DEFAULT_MODE,
-                        help="comma-separated dataset types: %s, or 'all' for every "
-                             "multilingual mode (default: %s)"
+                        help="comma-separated dataset types: %s, or 'all' for default "
+                             "plus every multilingual mode (default: %s)"
                              % (", ".join([DEFAULT_MODE] + sorted(MODES)), DEFAULT_MODE))
     parser.add_argument("--error-patterns", default=None,
                         help="enable error injection with these patterns: %s, or 'all'"

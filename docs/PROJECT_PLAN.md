@@ -26,8 +26,20 @@ Shared status so the team can track work. Legend: `[x]` done · `[~]` in progres
 
 - [x] Preliminary scalar / SIMD / thread-count benchmark harness
       (`scripts/benchmark_utf16validate.sh`, summary in `results/`).
+- [x] Benchmark methodology + fair comparison groups
+      (`docs/benchmark_methodology.md`).
+- [x] Cross-architecture evaluation (identical methodology on both hosts) —
+      runbook: `docs/cross_arch_evaluation.md`.
+      - [x] **CSIL x86-64** — `results/utf16_benchmark_csil_x86_64_summary.md` +
+            `results/csil_x86_64_toolchain.md` (126/126 OK; simdutf=`westmere`
+            on SSE4.2 QEMU guest — not Ice Lake). Owner: Daksh.
+      - [x] **Apple arm64** (M1) — `results/utf16_benchmark_apple_arm64_summary.md` +
+            `results/apple_arm64_toolchain.md` (84/84 OK; simdutf=`arm64` NEON; sizes
+            128/256, 512 omitted on the 8 GiB M1). Cross-arch: Parabix beats simdutf by
+            ~2.3–2.5× (adjusted) on both hosts.
 - [~] Clear single-thread (`--thread-num=1`) vs. default-thread throughput analysis.
-- [ ] Clausecker–Lemire (`simdutf`) **performance** comparison.
+- [~] Clausecker–Lemire (`simdutf`) **performance** comparison (included in the
+      cross-arch matrix as Group B; needs both machine summaries before reporting).
 - [ ] `simdutf` **differential correctness** oracle over a large corpus (stronger
       than our own scalar reference).
 - [ ] Graphs + final comparison tables; explain any unexpected results.
