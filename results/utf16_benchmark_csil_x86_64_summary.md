@@ -19,7 +19,7 @@
 | LLVM (Parabix JIT) | **18.1.3** (`/usr/lib/llvm-18`) — LLVM 16 preferred by docs; CSIL falls back to 18 |
 | Build type | Release |
 | Parabix commit | `f0369dd138e2e7a710566d5035f68b9cdc0bf305` |
-| simdutf | `v9.0.0` / `ca7acbcea967b5dcbab490066e99e3a6e7865539` |
+| simdutf | `v9.0.0` / `ca7acbcea967b5dcbab490066e99e3a6e6925539` |
 | simdutf selected kernel | **`westmere`** (SSE4.2 path — *not* Ice Lake / AVX-512) |
 
 **Caveat for the paper comparison:** this CSIL guest is **not** an Ice Lake physical

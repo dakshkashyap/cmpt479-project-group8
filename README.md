@@ -35,9 +35,11 @@ Only verified results are listed here:
   trailing byte after a large input).
 - Forced segment-size tests (`-segment-size=1,13,64`) pass.
 - A reproducible preliminary scalar/SIMD/thread-count benchmark is available.
-- Cross-architecture evaluation: **CSIL x86-64 is done**
-  (`results/utf16_benchmark_csil_x86_64_summary.md`); **Apple arm64** is the
-  teammate's matching run. Shared runbook:
+- Cross-architecture evaluation is **done on both hosts**: CSIL x86-64
+  (`results/utf16_benchmark_csil_x86_64_summary.md`, SSE4.2/`westmere`) and Apple arm64
+  (`results/utf16_benchmark_apple_arm64_summary.md`, NEON). Under identical methodology the
+  byte-oriented Parabix kernel beats the architecture's native simdutf SIMD path by a similar
+  ~2.3–2.5× (adjusted) on **both** ISAs. Shared runbook and caveats:
   [`docs/cross_arch_evaluation.md`](docs/cross_arch_evaluation.md).
 
 ## Repository layout
