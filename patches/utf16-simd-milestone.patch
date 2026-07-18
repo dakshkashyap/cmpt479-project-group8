@@ -42,10 +42,10 @@ index 00000000..17157d57
 +)
 diff --git a/tools/utf16validate/utf16validate.cpp b/tools/utf16validate/utf16validate.cpp
 new file mode 100644
-index 00000000..bf2ac4ce
+index 00000000..63aa203a
 --- /dev/null
 +++ b/tools/utf16validate/utf16validate.cpp
-@@ -0,0 +1,1049 @@
+@@ -0,0 +1,1348 @@
 +/*
 + *  Part of the Parabix Project, under the Open Software License 3.0.
 + *  SPDX-License-Identifier: OSL-3.0
@@ -55,6 +55,7 @@ index 00000000..bf2ac4ce
 +#include <kernel/pipeline/driver/cpudriver.h>
 +#include <kernel/pipeline/program_builder.h>
 +#include <kernel/io/source_kernel.h>
++#include <kernel/io/stdout_kernel.h>
 +#include <kernel/core/kernel.h>
 +#include <kernel/core/kernel_builder.h>
 +#include <kernel/core/streamset.h>
@@ -64,6 +65,8 @@ index 00000000..bf2ac4ce
 +#include <llvm/Support/CommandLine.h>
 +#include <iostream>
 +#include <string>
++#include <vector>
++#include <cstdio>
 +#include <sys/stat.h>
 +#include <fcntl.h>
 +#include <unistd.h>
@@ -123,6 +126,15 @@ index 00000000..bf2ac4ce
 +                                             "with a TwoLevelScanKernel subclass (skips clean "
 +                                             "regions) and print their positions."),
 +                                    cl::init(false), cl::cat(utf16validateOptions));
++
++// PROTOTYPE (issue #40). Repairs malformed UTF-16 code units by replacing every
++// code unit marked in errorMarks with U+FFFD. The existing validation, marker,
++// and scan paths remain unchanged unless --repair is selected.
++static cl::opt<bool> repairMode(
++    "repair",
++    cl::desc("PROTOTYPE: repair malformed UTF-16 using U+FFFD."),
++    cl::init(false),
++    cl::cat(utf16validateOptions));
 +
 +// ===========================================================================
 +// Scalar milestone (differential oracle) -- DO NOT MODIFY.
@@ -1039,6 +1051,208 @@ index 00000000..bf2ac4ce
 +    }
 +};
 +
++
++class UTF16RepairKernel final : public MultiBlockKernel {
++public:
++    UTF16RepairKernel(
++        LLVMTypeSystemInterface & ts,
++        StreamSet * const byteStream,
++        StreamSet * const errorMarks,
++        StreamSet * const repairedStream,
++        bool bigEndian = false);
++
++protected:
++    void generateMultiBlockLogic(
++        KernelBuilder & b,
++        llvm::Value * const numOfStrides) override;
++    const bool mBigEndian;
++};
++
++UTF16RepairKernel::UTF16RepairKernel(
++    LLVMTypeSystemInterface & ts,
++    StreamSet * const byteStream,
++    StreamSet * const errorMarks,
++    StreamSet * const repairedStream,
++    bool bigEndian)
++: MultiBlockKernel(
++    ts,
++    // The kernel name must encode endianness: it selects different U+FFFD bytes
++    // (FD FF for LE, FF FD for BE), so an LE-named kernel served from Parabix's
++    // object cache for a BE request would emit the wrong replacement character.
++    bigEndian ? "utf16repair_be" : "utf16repair",
++    {
++        // 2 input bytes per complete code unit; Linear() for raw-pointer reads.
++        Binding{"byteStream", byteStream, FixedRate(2), {Linear()}},
++        Binding{"errorMarks", errorMarks, FixedRate(1)}
++    },
++    {
++        // Two output bytes per COMPLETE code unit, written via a raw pointer.
++        // FixedRate(2) keeps the raw-pointer output path valid and simple. For an
++        // even-length input this produces exactly the repaired byte stream. For an
++        // odd-length input the framework emits one extra (incomplete) trailing byte;
++        // that byte -- and the U+FFFD replacement policy for it -- is handled by the
++        // host (see utf16validate()), which drops it and appends one U+FFFD.
++        Binding{"repairedStream", repairedStream, FixedRate(2)}
++    },
++    {},
++    {},
++    {})
++, mBigEndian(bigEndian) {
++}
++
++void UTF16RepairKernel::generateMultiBlockLogic(
++    KernelBuilder & b,
++    llvm::Value * const /* numOfStrides */) {
++
++    Type * const sizeTy = b.getSizeTy();
++    Type * const i8Ty = b.getInt8Ty();
++    Type * const i64Ty = b.getInt64Ty();
++
++    Value * const ZERO = b.getSize(0);
++    Value * const ONE = b.getSize(1);
++
++    // One errorMarks item corresponds to one complete UTF-16 code unit.
++    Value * const numUnits = b.getAccessibleItemCount("errorMarks");
++
++    // Current positions in each stream.
++    Value * const processedUnits =
++        b.getProcessedItemCount("errorMarks");
++
++    Value * const processedBytes =
++        b.getProcessedItemCount("byteStream");
++
++    // Output base is the repaired stream's OWN produced count (2 bytes per code
++    // unit already emitted), not the byteStream's processed count -- the two are
++    // distinct streams and only coincide by accident.
++    Value * const producedBytes =
++        b.getProducedItemCount("repairedStream");
++
++    // Raw input and output pointers for this invocation.
++    Value * const input =
++        b.getRawInputPointer("byteStream", processedBytes);
++
++    // Pointer to the first errorMarks block used by this invocation.
++    Value * const firstMarkBlock =
++        b.CreateUDiv(processedUnits, b.getSize(b.getBitBlockWidth()));
++
++    BasicBlock * const entry = b.GetInsertBlock();
++    BasicBlock * const loop = b.CreateBasicBlock("repairLoop");
++    BasicBlock * const done = b.CreateBasicBlock("repairDone");
++
++    b.CreateCondBr(
++        b.CreateICmpNE(numUnits, ZERO),
++        loop,
++        done);
++
++    b.SetInsertPoint(loop);
++
++    PHINode * const index = b.CreatePHI(sizeTy, 2);
++    index->addIncoming(ZERO, entry);
++
++    // Absolute code-unit position in errorMarks.
++    Value * const absoluteIndex =
++        b.CreateAdd(processedUnits, index);
++
++    // Locate the bit containing errorMarks[absoluteIndex].
++    Value * const blockNumber =
++        b.CreateUDiv(
++            absoluteIndex,
++            b.getSize(b.getBitBlockWidth()));
++
++    Value * const bitInBlock =
++        b.CreateURem(
++            absoluteIndex,
++            b.getSize(b.getBitBlockWidth()));
++
++    Value * const wordNumber =
++        b.CreateUDiv(bitInBlock, b.getSize(64));
++
++    Value * const bitInWord =
++        b.CreateURem(bitInBlock, b.getSize(64));
++
++    Value * const markBlock =
++        b.loadInputStreamBlock(
++            "errorMarks",
++            ZERO,
++            b.CreateSub(blockNumber, firstMarkBlock));
++
++    Value * const markWords =
++        b.CreateBitCast(
++            markBlock,
++            FixedVectorType::get(
++                i64Ty,
++                b.getBitBlockWidth() / 64));
++
++    Value * const word =
++        b.CreateExtractElement(
++            markWords,
++            b.CreateTrunc(wordNumber, b.getInt32Ty()));
++
++    Value * const shifted =
++        b.CreateLShr(word, b.CreateZExtOrTrunc(bitInWord, i64Ty));
++
++    Value * const marked =
++        b.CreateICmpNE(
++            b.CreateAnd(shifted, ConstantInt::get(i64Ty, 1)),
++            ConstantInt::get(i64Ty, 0));
++
++    // Each code unit occupies two bytes.
++    Value * const byteOffset = b.CreateShl(index, ONE);
++
++    Value * const originalLow =
++        b.CreateLoad(
++            i8Ty,
++            b.CreateGEP(i8Ty, input, byteOffset));
++
++    Value * const originalHigh =
++        b.CreateLoad(
++            i8Ty,
++            b.CreateGEP(
++                i8Ty,
++                input,
++                b.CreateAdd(byteOffset, ONE)));
++
++    // U+FFFD is FD FF in UTF-16LE and FF FD in UTF-16BE.
++    Value * const replacementFirst =
++        b.getInt8(mBigEndian ? 0xFF : 0xFD);
++    Value * const replacementSecond =
++        b.getInt8(mBigEndian ? 0xFD : 0xFF);
++
++    Value * const repairedLow =
++        b.CreateSelect(marked, replacementFirst, originalLow);
++
++    Value * const repairedHigh =
++        b.CreateSelect(marked, replacementSecond, originalHigh);
++
++    Value * const outputOffset =
++        b.CreateAdd(producedBytes, byteOffset);
++
++    Value * const outputLowPtr =
++        b.getRawOutputPointer(
++            "repairedStream",
++            ZERO,
++            outputOffset);
++
++    Value * const outputHighPtr =
++        b.getRawOutputPointer(
++            "repairedStream",
++            ZERO,
++            b.CreateAdd(outputOffset, ONE));
++
++    b.CreateStore(repairedLow, outputLowPtr);
++    b.CreateStore(repairedHigh, outputHighPtr);
++
++    Value * const nextIndex = b.CreateAdd(index, ONE);
++    index->addIncoming(nextIndex, loop);
++
++    b.CreateCondBr(
++        b.CreateICmpNE(nextIndex, numUnits),
++        loop,
++        done);
++
++    b.SetInsertPoint(done);
++}
++
 +typedef uint64_t (*utf16validateFunctionType)(const uint32_t fd);
 +
 +utf16validateFunctionType utf16validatePipelineGen(CPUDriver & driver) {
@@ -1046,17 +1260,19 @@ index 00000000..bf2ac4ce
 +    Scalar * const fileDescriptor = P.getInputScalar("fd");
 +    StreamSet * const ByteStream = P.CreateStreamSet(1, 8);
 +    P.CreateKernelCall<ReadSourceKernel>(fileDescriptor, ByteStream);
-+    if (emitErrorMarks) {
-+        // Prototype producer path (issue #32). Emits a real StreamSet(1) bitstream, one bit
-+        // per code unit, alongside the same errorCount the other paths report. The count-only
-+        // kernels above are untouched and are still what --simd and the default select.
++    if (emitErrorMarks || repairMode) {
++        // Prototype producer path (issue #32). Repair reuses the same position-accurate
++        // errorMarks stream and does not alter the existing validation or scan consumers.
 +        StreamSet * const ErrorMarks = P.CreateStreamSet(1);
 +        P.CreateKernelCall<UTF16ErrorMarksKernel>(ByteStream, ErrorMarks,
 +                                                  P.getOutputScalar("errorCount"), bigEndian);
-+        if (scanErrorMarks) {
++        if (repairMode) {
++            StreamSet * const RepairedStream = P.CreateStreamSet(1, 8);
++            P.CreateKernelCall<UTF16RepairKernel>(ByteStream, ErrorMarks,
++                                                   RepairedStream, bigEndian);
++            P.CreateKernelCall<StdOutKernel>(RepairedStream);
++        } else if (scanErrorMarks) {
 +            // Issue #39 consumer: a real TwoLevelScanKernel subclass that skips clean regions.
-+            // Endian-agnostic -- it scans the code-unit-indexed errorMarks bitstream, which the
-+            // producer has already made endian-correct.
 +            P.CreateKernelCall<UTF16ErrorMarkScanKernel>(ErrorMarks);
 +        } else if (printPositions) {
 +            // Issue #32 linear debug printer (visits every block).
@@ -1074,15 +1290,98 @@ index 00000000..bf2ac4ce
 +    return reinterpret_cast<utf16validateFunctionType>(P.compile());
 +}
 +
++// Append the U+FFFD replacement bytes for an odd trailing byte to fd 1.
++static void appendReplacementCharacter() {
++    // U+FFFD: FD FF in UTF-16LE, FF FD in UTF-16BE.
++    unsigned char replacement[2];
++    replacement[0] = bigEndian ? 0xFF : 0xFD;
++    replacement[1] = bigEndian ? 0xFD : 0xFF;
++    (void)!write(STDOUT_FILENO, replacement, sizeof(replacement));
++}
++
 +void utf16validate(utf16validateFunctionType fn_ptr, const std::string & fileName) {
 +    const int fd = open(fileName.c_str(), O_RDONLY);
 +    if (LLVM_UNLIKELY(fd == -1)) {
 +        std::cerr << "Error: cannot open " << fileName << " for processing. Skipped.\n";
 +        return;
 +    }
++
++    // Odd-trailing-byte policy (repair only): an odd final byte is not a whole code
++    // unit. The repair kernel only rewrites COMPLETE code units, and for an
++    // odd-length input the framework additionally emits the incomplete trailing byte.
++    // Per the documented policy (docs/utf16_repair.md) we DISCARD that byte and
++    // append exactly one U+FFFD code unit, so the repaired output is valid UTF-16
++    // (validate(repair(input)) == 0). We do this by capturing the pipeline's stdout
++    // for odd inputs, truncating to the whole-code-unit prefix, and appending U+FFFD.
++    // Even-length inputs take the direct fast path with no capture.
++    long inputSize = -1;
++    if (repairMode) {
++        struct stat st;
++        if (fstat(fd, &st) == 0) {
++            inputSize = static_cast<long>(st.st_size);
++        }
++    }
++    const bool oddRepair = repairMode && (inputSize >= 0) && ((inputSize & 1) != 0);
++
++    if (oddRepair) {
++        // Redirect the pipeline's stdout into an anonymous temp file, then rewrite it.
++        FILE * const tmp = tmpfile();
++        if (tmp == nullptr) {
++            // Could not capture; fall back to running normally so we do not lose output.
++            const uint64_t errorCount = fn_ptr(fd);
++            close(fd);
++            appendReplacementCharacter();
++            std::cerr << fileName << ": errorCount = " << errorCount << "\n";
++            return;
++        }
++        const int tmpFd = fileno(tmp);
++        const int savedStdout = dup(STDOUT_FILENO);
++        dup2(tmpFd, STDOUT_FILENO);
++
++        const uint64_t errorCount = fn_ptr(fd);
++        close(fd);
++
++        // StdOutKernel writes via raw write(2), so nothing is buffered in stdio; but
++        // restore the real stdout before we emit the rewritten bytes.
++        dup2(savedStdout, STDOUT_FILENO);
++        close(savedStdout);
++
++        // Read back the captured repaired bytes and keep only the whole-code-unit
++        // prefix (2 * (inputSize / 2) bytes), then append one U+FFFD.
++        const long completeBytes = inputSize - 1;   // inputSize is odd
++        std::vector<unsigned char> captured;
++        {
++            const long end = lseek(tmpFd, 0, SEEK_END);
++            lseek(tmpFd, 0, SEEK_SET);
++            if (end > 0) {
++                captured.resize(static_cast<size_t>(end));
++                ssize_t got = read(tmpFd, captured.data(), captured.size());
++                if (got < 0) got = 0;
++                captured.resize(static_cast<size_t>(got));
++            }
++        }
++        fclose(tmp);
++
++        size_t keep = captured.size();
++        if (keep > static_cast<size_t>(completeBytes)) {
++            keep = static_cast<size_t>(completeBytes);
++        }
++        if (keep > 0) {
++            (void)!write(STDOUT_FILENO, captured.data(), keep);
++        }
++        appendReplacementCharacter();
++        std::cerr << fileName << ": errorCount = " << errorCount << "\n";
++        return;
++    }
++
 +    const uint64_t errorCount = fn_ptr(fd);
 +    close(fd);
-+    std::cout << fileName << ": errorCount = " << errorCount << "\n";
++    if (repairMode) {
++        // Repaired UTF-16 bytes are already on stdout; diagnostics go to stderr.
++        std::cerr << fileName << ": errorCount = " << errorCount << "\n";
++    } else {
++        std::cout << fileName << ": errorCount = " << errorCount << "\n";
++    }
 +}
 +
 +int main(int argc, char *argv[]) {
@@ -1095,3 +1394,4 @@ index 00000000..bf2ac4ce
 +    }
 +    return 0;
 +}
+\ No newline at end of file
