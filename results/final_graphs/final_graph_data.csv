@@ -1,0 +1,45 @@
+graph,series,category,adjusted_mibps
+1_cross_arch,parabix_simd_t1,CSIL x86-64 128 MiB,3036.7
+1_cross_arch,simdutf,CSIL x86-64 128 MiB,1256.2
+1_cross_arch,parabix_simd_t1,CSIL x86-64 256 MiB,3154.9
+1_cross_arch,simdutf,CSIL x86-64 256 MiB,1253.7
+1_cross_arch,parabix_simd_t1,Apple arm64 128 MiB,5121.1
+1_cross_arch,simdutf,Apple arm64 128 MiB,2199.7
+1_cross_arch,parabix_simd_t1,Apple arm64 256 MiB,5152.2
+1_cross_arch,simdutf,Apple arm64 256 MiB,2198.0
+2_scalar_vs_simd,scalar,CSIL x86-64 128 MiB,2635.0
+2_scalar_vs_simd,parabix_simd_t1,CSIL x86-64 128 MiB,3036.7
+2_scalar_vs_simd,scalar,CSIL x86-64 256 MiB,2558.4
+2_scalar_vs_simd,parabix_simd_t1,CSIL x86-64 256 MiB,3154.9
+2_scalar_vs_simd,scalar,Apple arm64 128 MiB,2365.2
+2_scalar_vs_simd,parabix_simd_t1,Apple arm64 128 MiB,5121.1
+2_scalar_vs_simd,scalar,Apple arm64 256 MiB,2373.1
+2_scalar_vs_simd,parabix_simd_t1,Apple arm64 256 MiB,5152.2
+3_thread_scaling,CSIL x86-64 128 MiB,t1,3036.7
+3_thread_scaling,CSIL x86-64 128 MiB,t2,3960.0
+3_thread_scaling,CSIL x86-64 128 MiB,t3,4014.9
+3_thread_scaling,CSIL x86-64 128 MiB,default,4134.0
+3_thread_scaling,CSIL x86-64 256 MiB,t1,3154.9
+3_thread_scaling,CSIL x86-64 256 MiB,t2,4936.2
+3_thread_scaling,CSIL x86-64 256 MiB,t3,4193.5
+3_thread_scaling,CSIL x86-64 256 MiB,default,4171.6
+3_thread_scaling,Apple arm64 128 MiB,t1,5121.1
+3_thread_scaling,Apple arm64 128 MiB,t2,8281.7
+3_thread_scaling,Apple arm64 128 MiB,t3,7700.3
+3_thread_scaling,Apple arm64 128 MiB,default,7808.8
+3_thread_scaling,Apple arm64 256 MiB,t1,5152.2
+3_thread_scaling,Apple arm64 256 MiB,t2,8603.7
+3_thread_scaling,Apple arm64 256 MiB,t3,8264.2
+3_thread_scaling,Apple arm64 256 MiB,default,8172.1
+4_ablation_apple,scalar,128MiB_1thread,2384.6
+4_ablation_apple,SIMD count-only,128MiB_1thread,5216.4
+4_ablation_apple,errorMarks producer,128MiB_1thread,5063.2
+4_ablation_apple,errorMarks + scan,128MiB_1thread,5030.4
+4_ablation_apple,repair (U+FFFD),128MiB_1thread,1492.6
+4_ablation_apple,simdutf (NEON),128MiB_1thread,2301.5
+5_correctness,Repair tests (test_utf16_repair.sh),passed/total,64/64
+5_correctness,simdutf even-length cross-checks,passed/total,7/7
+5_correctness,Validator suite (test_utf16validate.sh),passed/total,67/67
+5_correctness,errorMarks suite (test_errormarks.sh),passed/total,49/49
+5_correctness,Scan consumer (test_scan_consumer.sh),passed/total,54/54
+5_correctness,UTF-16BE suite (test_utf16be.sh),passed/total,35/35
