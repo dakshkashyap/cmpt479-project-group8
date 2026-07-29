@@ -42,10 +42,10 @@ index 00000000..17157d57
 +)
 diff --git a/tools/utf16validate/utf16validate.cpp b/tools/utf16validate/utf16validate.cpp
 new file mode 100644
-index 00000000..63aa203a
+index 00000000..4b262597
 --- /dev/null
 +++ b/tools/utf16validate/utf16validate.cpp
-@@ -0,0 +1,1348 @@
+@@ -0,0 +1,1366 @@
 +/*
 + *  Part of the Parabix Project, under the Open Software License 3.0.
 + *  SPDX-License-Identifier: OSL-3.0
@@ -688,6 +688,25 @@ index 00000000..63aa203a
 +    Value * const processed = b.getProcessedItemCount("byteStream");
 +    Value * const i8base = b.getRawInputPointer("byteStream", processed);
 +
++    // An incomplete trailing byte is NOT a code unit, so it must never be read as the high
++    // byte of a following code unit. The k+1 lookahead below reads that high byte at raw
++    // offset 2(k+1)+HB; for UTF-16BE (HB=0) that is EXACTLY the odd trailing byte, so a
++    // trailing 0xDC..0xDF would masquerade as a low surrogate and wrongly pair with a real
++    // final high surrogate. (UTF-16LE reads the byte after it, which the pipeline zero-fills,
++    // so LE never had this.) Neutralize a lookahead that lands on that byte; anything past it
++    // is already zero-filled, and non-final segments are untouched because their lookahead is
++    // genuine next-segment data.
++    Value * const finalSegment = b.isFinal();
++    Value * const hasOddTailByte = b.CreateAnd(finalSegment,
++                                               b.CreateICmpNE(b.CreateAnd(avail, ONE), ZERO));
++    Value * const oddTailOffset = b.CreateSub(avail, ONE);
++    auto loadLookaheadHighByte = [&](Value * const off) -> Value * {
++        Value * const raw = b.CreateLoad(i8Ty, b.CreateGEP(i8Ty, i8base, off));
++        return b.CreateSelect(
++            b.CreateAnd(hasOddTailByte, b.CreateICmpUGE(off, oddTailOffset)),
++            ConstantInt::get(i8Ty, 0), raw);
++    };
++
 +    // The carry: the previous pack's high-surrogate byte mask. Only its last high-byte lane
 +    // matters, so the incoming pendingHigh is injected there as 0xFF (what simd_eq produces).
 +    Value * const pendByte = b.CreateSExt(pendIn, i8Ty);
@@ -736,7 +755,7 @@ index 00000000..63aa203a
 +        // marks itself with no EOF special case.
 +        Value * const laOff = b.CreateAdd(b.CreateMul(b.CreateAdd(P, ONE),
 +                                                      b.getSize(BYTES_PER_PACK)), b.getSize(HB));
-+        Value * const laByte = b.CreateLoad(i8Ty, b.CreateGEP(i8Ty, i8base, laOff));
++        Value * const laByte = loadLookaheadHighByte(laOff);
 +        Value * const laIsLow = b.CreateICmpEQ(b.CreateAnd(laByte, b.getInt8(0xFC)),
 +                                               b.getInt8(0xDC));
 +        // mvmd_dslli(fw, a, b, s): result[i] = a[i-s] for i>=s, else b[fieldCount-s+i].
@@ -825,8 +844,7 @@ index 00000000..63aa203a
 +    // at most avail+1, inside the LookAhead(2) region, and zero at EOF.
 +    Value * const hiOff = b.CreateAdd(b.CreateShl(idx, ONE), b.getSize(HB));
 +    Value * const hiByte = b.CreateLoad(i8Ty, b.CreateGEP(i8Ty, i8base, hiOff));
-+    Value * const nxByte = b.CreateLoad(i8Ty, b.CreateGEP(i8Ty, i8base,
-+                                                          b.CreateAdd(hiOff, b.getSize(2))));
++    Value * const nxByte = loadLookaheadHighByte(b.CreateAdd(hiOff, b.getSize(2)));
 +    Value * const tMasked = b.CreateAnd(hiByte, b.getInt8(0xFC));
 +    Value * const tIsHigh = b.CreateICmpEQ(tMasked, b.getInt8(0xD8));
 +    Value * const tIsLow  = b.CreateICmpEQ(tMasked, b.getInt8(0xDC));
