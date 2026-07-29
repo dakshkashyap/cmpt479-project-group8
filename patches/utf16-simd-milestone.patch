@@ -42,10 +42,10 @@ index 00000000..17157d57
 +)
 diff --git a/tools/utf16validate/utf16validate.cpp b/tools/utf16validate/utf16validate.cpp
 new file mode 100644
-index 00000000..4b262597
+index 00000000..420513ad
 --- /dev/null
 +++ b/tools/utf16validate/utf16validate.cpp
-@@ -0,0 +1,1366 @@
+@@ -0,0 +1,1826 @@
 +/*
 + *  Part of the Parabix Project, under the Open Software License 3.0.
 + *  SPDX-License-Identifier: OSL-3.0
@@ -67,6 +67,13 @@ index 00000000..4b262597
 +#include <string>
 +#include <vector>
 +#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <ctime>
++#include <chrono>
++#include <algorithm>
++#include <iomanip>
++#include <sstream>
 +#include <sys/stat.h>
 +#include <fcntl.h>
 +#include <unistd.h>
@@ -78,7 +85,10 @@ index 00000000..4b262597
 +static cl::OptionCategory utf16validateOptions("utf16validate Options",
 +                                               "UTF-16 validation control options.");
 +
-+static cl::list<std::string> inputFiles(cl::Positional, cl::desc("<input file ...>"), cl::OneOrMore, cl::cat(utf16validateOptions));
++// ZeroOrMore rather than OneOrMore so that a JSON run with no input file still reaches the
++// JSON layer and can emit a structured error document. The "no input file" case is still
++// an error with a non-zero exit in both modes -- see main().
++static cl::list<std::string> inputFiles(cl::Positional, cl::desc("<input file ...>"), cl::ZeroOrMore, cl::cat(utf16validateOptions));
 +
 +// Select the SIMD validation pipeline instead of the default scalar one. Both
 +// pipelines expose the exact same generated function signature
@@ -130,6 +140,15 @@ index 00000000..4b262597
 +// PROTOTYPE (issue #40). Repairs malformed UTF-16 code units by replacing every
 +// code unit marked in errorMarks with U+FFFD. The existing validation, marker,
 +// and scan paths remain unchanged unless --repair is selected.
++static cl::opt<bool> jsonOutput("json",
++    cl::desc("Emit one machine-readable JSON diagnostic document per input file instead of "
++             "the human-readable line. Human-readable output is unchanged without this."),
++    cl::init(false), cl::cat(utf16validateOptions));
++
++static cl::opt<bool> jsonPretty("json-pretty",
++    cl::desc("Like --json, but indented for reading. Implies --json."),
++    cl::init(false), cl::cat(utf16validateOptions));
++
 +static cl::opt<bool> repairMode(
 +    "repair",
 +    cl::desc("PROTOTYPE: repair malformed UTF-16 using U+FFFD."),
@@ -1317,11 +1336,424 @@ index 00000000..4b262597
 +    (void)!write(STDOUT_FILENO, replacement, sizeof(replacement));
 +}
 +
-+void utf16validate(utf16validateFunctionType fn_ptr, const std::string & fileName) {
++// ===========================================================================
++// Machine-readable diagnostics (issue #46).
++// ===========================================================================
++//
++// --json / --json-pretty emit ONE JSON document per input file. They are purely an
++// output format: no validation, repair or scan behaviour changes, and without either
++// flag every existing human-readable line is byte-for-byte what it always was.
++//
++// The position printers and the repair kernel write to stdout from inside the
++// pipeline, so JSON mode captures that stream (the same dup2/tmpfile technique the
++// odd-trailing-byte repair path already uses) and turns it into structured fields:
++// positions become a numeric array, repaired bytes become counts. Binary repair
++// output is never embedded in the document.
++
++static bool jsonEnabled() { return jsonOutput || jsonPretty; }
++
++static std::string jsonEscape(const std::string & text) {
++    std::string out;
++    out.reserve(text.size() + 8);
++    for (const char c : text) {
++        switch (c) {
++            case '"':  out += "\\\""; break;
++            case '\\': out += "\\\\"; break;
++            case '\n': out += "\\n"; break;
++            case '\r': out += "\\r"; break;
++            case '\t': out += "\\t"; break;
++            default:
++                if (static_cast<unsigned char>(c) < 0x20) {
++                    char buf[8];
++                    snprintf(buf, sizeof(buf), "\\u%04x", c & 0xFF);
++                    out += buf;
++                } else {
++                    out += c;
++                }
++        }
++    }
++    return out;
++}
++
++// The command line, reconstructed for provenance.
++static std::string gCommandLine;
++
++static std::string isoTimestampUTC() {
++    const std::time_t now = std::time(nullptr);
++    std::tm tm;
++    gmtime_r(&now, &tm);
++    char buf[32];
++    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
++    return std::string(buf);
++}
++
++// Which single operation this invocation performed. The flags are checked in the same
++// order the pipeline builder selects them, so the label always matches what ran.
++static std::string operationName() {
++    if (repairMode) return "repair";
++    if (emitErrorMarks && scanErrorMarks) return "locate_scan";
++    if (emitErrorMarks && printPositions) return "locate_linear";
++    if (emitErrorMarks) return "emit_error_marks";
++    if (useSIMD) return "validate_simd";
++    return "validate_scalar";
++}
++
++// Pull "errpos = <hex>" lines out of captured pipeline stdout.
++static std::vector<uint64_t> parsePositions(const std::string & captured) {
++    std::vector<uint64_t> positions;
++    std::size_t start = 0;
++    while (start < captured.size()) {
++        std::size_t end = captured.find('\n', start);
++        if (end == std::string::npos) end = captured.size();
++        const std::string line = captured.substr(start, end - start);
++        if (line.compare(0, 6, "errpos") == 0) {
++            const std::size_t eq = line.find('=');
++            if (eq != std::string::npos) {
++                positions.push_back(std::strtoull(line.c_str() + eq + 1, nullptr, 16));
++            }
++        }
++        start = end + 1;
++    }
++    return positions;
++}
++
++static uint16_t codeUnitAt(const std::vector<unsigned char> & bytes, std::size_t index) {
++    const unsigned char lo = bytes[2 * index];
++    const unsigned char hi = bytes[2 * index + 1];
++    return bigEndian ? static_cast<uint16_t>((lo << 8) | hi)
++                     : static_cast<uint16_t>(lo | (hi << 8));
++}
++
++// A serial, self-contained well-formedness check over already-repaired bytes. It exists
++// only to fill in repair.output_valid; it does not touch the validator kernels and does
++// not change repair behaviour.
++static bool repairedOutputIsWellFormed(const std::vector<unsigned char> & bytes) {
++    if ((bytes.size() & 1) != 0) return false;
++    const std::size_t units = bytes.size() / 2;
++    for (std::size_t k = 0; k < units; ++k) {
++        const uint16_t unit = codeUnitAt(bytes, k);
++        if (unit >= 0xD800 && unit <= 0xDBFF) {
++            if (k + 1 >= units) return false;
++            const uint16_t next = codeUnitAt(bytes, k + 1);
++            if (next < 0xDC00 || next > 0xDFFF) return false;
++            ++k;
++        } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
++            return false;
++        }
++    }
++    return true;
++}
++
++// How many code units the repair actually rewrote: positions where the output differs
++// from the input, plus the appended U+FFFD when the input had an odd trailing byte.
++static uint64_t countReplacements(const std::vector<unsigned char> & input,
++                                  const std::vector<unsigned char> & output) {
++    const std::size_t inputUnits = input.size() / 2;
++    const std::size_t outputUnits = output.size() / 2;
++    const std::size_t common = std::min(inputUnits, outputUnits);
++    uint64_t replacements = 0;
++    for (std::size_t k = 0; k < common; ++k) {
++        if (codeUnitAt(input, k) != codeUnitAt(output, k)) ++replacements;
++    }
++    if ((input.size() & 1) != 0 && outputUnits > inputUnits) ++replacements;
++    return replacements;
++}
++
++// Everything a JSON document may carry. Fields are only emitted when the corresponding
++// have* flag is set, so a document never claims a value that was not actually produced.
++struct JsonReport {
++    std::string file;
++    bool haveFile = false;
++    long sizeBytes = -1;              // negative means "not known"
++    bool haveGeometry = false;
++    bool haveValidation = false;      // set only once the pipeline has actually run
++    uint64_t errorCount = 0;
++    bool haveMarks = false;
++    uint64_t markCount = 0;
++    bool haveTiming = false;
++    double elapsedSeconds = 0.0;
++    bool havePositions = false;
++    std::vector<uint64_t> positions;
++    bool haveRepair = false;
++    uint64_t replacementCount = 0;
++    bool repairOutputValid = false;
++    std::vector<std::string> warnings;
++    bool ok = true;                   // false => an "error" object is emitted instead
++    std::string errorCode;
++    std::string errorMessage;
++};
++
++// Stable machine-readable error codes. These are part of the contract: automation should
++// branch on the code, never on the human-facing message.
++static const char * const kErrJsonSingleInput = "json_requires_single_input";
++static const char * const kErrInputOpenFailed = "input_open_failed";
++static const char * const kErrCaptureSetupFailed = "capture_setup_failed";
++static const char * const kErrCaptureReadFailed = "capture_read_failed";
++
++// One writer for success and failure alike, so both share the same envelope:
++// version, tool, command, timestamp, operation, status, warnings, metadata are ALWAYS
++// present. Everything else is conditional on having really been produced.
++static void emitJson(const JsonReport & report) {
++    const bool pretty = jsonPretty;
++    const std::string nl = pretty ? "\n" : "";
++    const std::string in1 = pretty ? "  " : "";
++    const std::string in2 = pretty ? "    " : "";
++    const std::string sp = pretty ? " " : "";
++
++    std::ostringstream out;
++    out << "{" << nl;
++    // --- stable envelope -----------------------------------------------------
++    out << in1 << "\"version\":" << sp << "1," << nl;
++    out << in1 << "\"tool\":" << sp << "\"utf16validate\"," << nl;
++    out << in1 << "\"command\":" << sp << "\"" << jsonEscape(gCommandLine) << "\"," << nl;
++    out << in1 << "\"timestamp\":" << sp << "\"" << isoTimestampUTC() << "\"," << nl;
++    out << in1 << "\"operation\":" << sp << "\"" << operationName() << "\"," << nl;
++    out << in1 << "\"status\":" << sp << "\"" << (report.ok ? "ok" : "error") << "\"," << nl;
++    out << in1 << "\"encoding\":" << sp << "\""
++        << (bigEndian ? "UTF-16BE" : "UTF-16LE") << "\"," << nl;
++
++    // --- identifying fields, emitted when known ------------------------------
++    if (report.haveFile) {
++        out << in1 << "\"file\":" << sp << "\"" << jsonEscape(report.file) << "\"," << nl;
++    }
++    if (report.haveGeometry) {
++        out << in1 << "\"size_bytes\":" << sp << report.sizeBytes << "," << nl;
++        out << in1 << "\"code_units\":" << sp << (report.sizeBytes / 2) << "," << nl;
++    } else if (!report.ok) {
++        // Failure-only exception, documented in the README: the size is genuinely unknown
++        // rather than zero, and null says so without pretending to be a count.
++        out << in1 << "\"size_bytes\":" << sp << "null," << nl;
++        out << in1 << "\"code_units\":" << sp << "null," << nl;
++    }
++
++    // --- success-only measurement fields -------------------------------------
++    // error_count and validation appear ONLY when the pipeline actually ran, so a failure
++    // document can never be mistaken for a clean validation.
++    if (report.haveValidation) {
++        out << in1 << "\"error_count\":" << sp << report.errorCount << "," << nl;
++        out << in1 << "\"validation\":" << sp << "{" << nl;
++        out << in2 << "\"valid\":" << sp << (report.errorCount == 0 ? "true" : "false")
++            << "," << nl;
++        out << in2 << "\"error_count\":" << sp << report.errorCount << nl;
++        out << in1 << "}," << nl;
++    }
++    if (report.haveMarks) {
++        out << in1 << "\"error_marks\":" << sp << "{" << nl;
++        out << in2 << "\"mark_count\":" << sp << report.markCount << nl;
++        out << in1 << "}," << nl;
++    }
++    if (report.havePositions) {
++        const char * key = scanErrorMarks ? "scan_positions" : "positions";
++        out << in1 << "\"" << key << "\":" << sp << "[";
++        for (std::size_t i = 0; i < report.positions.size(); ++i) {
++            if (i) out << "," << sp;
++            out << report.positions[i];
++        }
++        out << "]," << nl;
++    }
++    if (report.haveRepair) {
++        out << in1 << "\"repair\":" << sp << "{" << nl;
++        out << in2 << "\"performed\":" << sp << "true," << nl;
++        out << in2 << "\"replacement_count\":" << sp << report.replacementCount << "," << nl;
++        out << in2 << "\"output_valid\":" << sp
++            << (report.repairOutputValid ? "true" : "false") << nl;
++        out << in1 << "}," << nl;
++    }
++    if (report.haveTiming) {
++        out << in1 << "\"timing\":" << sp << "{" << nl;
++        out << in2 << "\"elapsed_seconds\":" << sp << std::fixed << std::setprecision(9)
++            << report.elapsedSeconds << nl;
++        out << in1 << "}," << nl;
++        out.unsetf(std::ios_base::floatfield);
++    }
++
++    // --- failure-only structured error ---------------------------------------
++    if (!report.ok) {
++        out << in1 << "\"error\":" << sp << "{" << nl;
++        out << in2 << "\"code\":" << sp << "\"" << jsonEscape(report.errorCode)
++            << "\"," << nl;
++        out << in2 << "\"message\":" << sp << "\"" << jsonEscape(report.errorMessage)
++            << "\"" << nl;
++        out << in1 << "}," << nl;
++    }
++
++    // --- envelope tail -------------------------------------------------------
++    out << in1 << "\"warnings\":" << sp << "[";
++    for (std::size_t i = 0; i < report.warnings.size(); ++i) {
++        if (i) out << "," << sp;
++        out << "\"" << jsonEscape(report.warnings[i]) << "\"";
++    }
++    out << "]," << nl;
++    out << in1 << "\"metadata\":" << sp << "{" << nl;
++    out << in2 << "\"implementation\":" << sp << "\""
++        << (repairMode || emitErrorMarks ? "parabix_error_marks"
++                                         : (useSIMD ? "parabix_simd" : "scalar"))
++        << "\"," << nl;
++    out << in2 << "\"big_endian\":" << sp << (bigEndian ? "true" : "false") << "," << nl;
++    out << in2 << "\"odd_trailing_byte\":" << sp
++        << ((report.haveGeometry && (report.sizeBytes & 1) != 0) ? "true" : "false") << nl;
++    out << in1 << "}" << nl;
++    out << "}" << "\n";
++    std::cout << out.str();
++    std::cout.flush();
++}
++
++// One failure document, sharing the envelope above.
++static void emitJsonError(const std::string & code, const std::string & message,
++                          const std::string & fileName, bool haveFile) {
++    JsonReport report;
++    report.ok = false;
++    report.errorCode = code;
++    report.errorMessage = message;
++    report.file = fileName;
++    report.haveFile = haveFile;
++    emitJson(report);
++}
++
++// Returns true on success. In JSON mode a false return means an "error" document was
++// emitted and the process must exit non-zero.
++bool utf16validate(utf16validateFunctionType fn_ptr, const std::string & fileName) {
 +    const int fd = open(fileName.c_str(), O_RDONLY);
 +    if (LLVM_UNLIKELY(fd == -1)) {
 +        std::cerr << "Error: cannot open " << fileName << " for processing. Skipped.\n";
-+        return;
++        if (jsonEnabled()) {
++            emitJsonError(kErrInputOpenFailed, "cannot open input file", fileName, true);
++            return false;
++        }
++        return true;    // human-readable mode has always skipped and carried on
++    }
++
++    // --- machine-readable mode (issue #46) ------------------------------------
++    // Everything the pipeline would write to stdout (positions, or repaired bytes) is
++    // captured instead, so the only thing on stdout is one JSON document. The pipeline
++    // itself runs exactly as it always does.
++    if (jsonEnabled()) {
++        JsonReport report;
++        report.file = fileName;
++        struct stat st;
++        if (fstat(fd, &st) == 0) {
++            report.sizeBytes = static_cast<long>(st.st_size);
++            report.haveGeometry = true;
++        }
++        report.haveFile = true;
++
++        std::vector<unsigned char> inputBytes;
++        if (repairMode && report.sizeBytes > 0) {
++            inputBytes.resize(static_cast<size_t>(report.sizeBytes));
++            const long saved = lseek(fd, 0, SEEK_CUR);
++            lseek(fd, 0, SEEK_SET);
++            ssize_t got = read(fd, inputBytes.data(), inputBytes.size());
++            if (got < 0) got = 0;
++            inputBytes.resize(static_cast<size_t>(got));
++            lseek(fd, saved, SEEK_SET);
++        }
++
++        // Capture setup. If ANY step fails we emit a structured error rather than an "ok"
++        // document: reporting error_count 0 for a run that never happened would be worse
++        // than reporting nothing.
++        FILE * const tmp = tmpfile();
++        if (tmp == nullptr) {
++            close(fd);
++            emitJsonError(kErrCaptureSetupFailed,
++                          "could not create a temporary file to capture pipeline output",
++                          fileName, true);
++            return false;
++        }
++        const int tmpFd = fileno(tmp);
++        const int savedStdout = dup(STDOUT_FILENO);
++        if (savedStdout == -1) {
++            fclose(tmp);
++            close(fd);
++            emitJsonError(kErrCaptureSetupFailed, "could not duplicate stdout", fileName,
++                          true);
++            return false;
++        }
++        if (dup2(tmpFd, STDOUT_FILENO) == -1) {
++            close(savedStdout);
++            fclose(tmp);
++            close(fd);
++            emitJsonError(kErrCaptureSetupFailed,
++                          "could not redirect stdout for capture", fileName, true);
++            return false;
++        }
++
++        const auto begin = std::chrono::steady_clock::now();
++        const uint64_t errorCount = fn_ptr(fd);
++        const auto finish = std::chrono::steady_clock::now();
++        close(fd);
++
++        const int restored = dup2(savedStdout, STDOUT_FILENO);
++        close(savedStdout);
++        if (restored == -1) {
++            fclose(tmp);
++            emitJsonError(kErrCaptureSetupFailed, "could not restore stdout after capture",
++                          fileName, true);
++            return false;
++        }
++
++        report.haveValidation = true;       // the pipeline ran: this count is real
++        report.errorCount = errorCount;
++        report.haveTiming = true;
++        report.elapsedSeconds =
++            std::chrono::duration<double>(finish - begin).count();
++        if (emitErrorMarks) {
++            const uint64_t oddByte =
++                (report.haveGeometry && (report.sizeBytes & 1) != 0) ? 1u : 0u;
++            report.haveMarks = true;
++            report.markCount = errorCount >= oddByte ? errorCount - oddByte : 0;
++        }
++
++        std::vector<unsigned char> captured;
++        bool captureReadOk = true;
++        {
++            const long end = lseek(tmpFd, 0, SEEK_END);
++            if (end < 0 || lseek(tmpFd, 0, SEEK_SET) < 0) {
++                captureReadOk = false;
++            } else if (end > 0) {
++                captured.resize(static_cast<size_t>(end));
++                const ssize_t got = read(tmpFd, captured.data(), captured.size());
++                if (got < 0) {
++                    captureReadOk = false;
++                    captured.clear();
++                } else {
++                    captured.resize(static_cast<size_t>(got));
++                }
++            }
++        }
++        fclose(tmp);
++
++        // Operations whose whole result lives in the captured stream must not report a
++        // cheerful empty answer when the capture could not be read.
++        if (!captureReadOk && (repairMode || printPositions || scanErrorMarks)) {
++            emitJsonError(kErrCaptureReadFailed,
++                          "pipeline ran but its captured output could not be read, so "
++                          "positions/repair details are unavailable", fileName, true);
++            return false;
++        }
++
++        if (repairMode) {
++            // Apply the documented odd-trailing-byte policy to the captured bytes so the
++            // reported counts describe the same output the non-JSON mode would write.
++            if (report.sizeBytes >= 0 && (report.sizeBytes & 1) != 0) {
++                const size_t keep = static_cast<size_t>(report.sizeBytes - 1);
++                if (captured.size() > keep) captured.resize(keep);
++                captured.push_back(bigEndian ? 0xFF : 0xFD);
++                captured.push_back(bigEndian ? 0xFD : 0xFF);
++            }
++            report.haveRepair = true;
++            report.replacementCount = countReplacements(inputBytes, captured);
++            report.repairOutputValid = repairedOutputIsWellFormed(captured);
++            report.warnings.push_back("repaired bytes are not included in JSON; run "
++                                      "without --json to write them to stdout");
++        } else if (printPositions || scanErrorMarks) {
++            report.havePositions = true;
++            report.positions = parsePositions(
++                std::string(reinterpret_cast<const char *>(captured.data()),
++                            captured.size()));
++        }
++
++        emitJson(report);
++        return true;
 +    }
 +
 +    // Odd-trailing-byte policy (repair only): an odd final byte is not a whole code
@@ -1350,7 +1782,7 @@ index 00000000..4b262597
 +            close(fd);
 +            appendReplacementCharacter();
 +            std::cerr << fileName << ": errorCount = " << errorCount << "\n";
-+            return;
++            return true;
 +        }
 +        const int tmpFd = fileno(tmp);
 +        const int savedStdout = dup(STDOUT_FILENO);
@@ -1389,7 +1821,7 @@ index 00000000..4b262597
 +        }
 +        appendReplacementCharacter();
 +        std::cerr << fileName << ": errorCount = " << errorCount << "\n";
-+        return;
++        return true;
 +    }
 +
 +    const uint64_t errorCount = fn_ptr(fd);
@@ -1400,16 +1832,44 @@ index 00000000..4b262597
 +    } else {
 +        std::cout << fileName << ": errorCount = " << errorCount << "\n";
 +    }
++    return true;
 +}
 +
 +int main(int argc, char *argv[]) {
++    {
++        std::ostringstream joined;
++        for (int i = 0; i < argc; ++i) {
++            if (i) joined << ' ';
++            joined << argv[i];
++        }
++        gCommandLine = joined.str();
++    }
 +    codegen::ParseCommandLineOptions(argc, argv, {&utf16validateOptions, codegen::codegen_flags()});
++
++    // A JSON run must produce exactly ONE complete document, so it takes exactly one input
++    // file. Concatenating a document per file would not be parseable as a whole, and
++    // emitting a partial document would be worse. Human-readable multi-file behaviour is
++    // untouched.
++    if (!jsonEnabled() && inputFiles.empty()) {
++        std::cerr << "utf16validate: no input file specified.\n"
++                     "Must specify at least 1 positional argument. See: utf16validate --help\n";
++        return 1;
++    }
++
++    if (jsonEnabled() && inputFiles.size() != 1) {
++        std::ostringstream message;
++        message << "--json requires exactly one input file; " << inputFiles.size()
++                << " were given";
++        emitJsonError(kErrJsonSingleInput, message.str(), std::string(), false);
++        return 1;
++    }
 +
 +    CPUDriver driver("utf16validate");
 +    auto fn_ptr = utf16validatePipelineGen(driver);
++    bool allOk = true;
 +    for (unsigned i = 0; i != inputFiles.size(); ++i) {
-+        utf16validate(fn_ptr, inputFiles[i]);
++        if (!utf16validate(fn_ptr, inputFiles[i])) allOk = false;
 +    }
-+    return 0;
++    return allOk ? 0 : 1;
 +}
 \ No newline at end of file

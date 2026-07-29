@@ -386,23 +386,56 @@ def measure_fixed_overhead(binary, simdutf_bin, warmups, iterations, timeout, de
 
 # --- Correctness gate ----------------------------------------------------------
 
-def parabix_count(binary, args, path, timeout):
-    proc = subprocess.run([binary] + args + [path], stdout=subprocess.PIPE,
+# The correctness gate consumes the tool's machine-readable diagnostics (issue #46) rather
+# than parsing human-readable text: counts and positions come back as JSON numbers and
+# arrays, so there is no output-format parsing to get wrong. TIMED runs are deliberately
+# left alone -- adding --json would change what is being measured, and the benchmark
+# methodology is unchanged.
+
+def parabix_json(binary, args, path, timeout, require=None, expect_operation=None):
+    """Run the tool with --json and return the parsed diagnostic document.
+
+    Defensive on purpose: a benchmark must never quietly treat a failure document, a
+    truncated stream or a document describing a *different* operation as a real result.
+    """
+    proc = subprocess.run([binary] + args + ["--json", path], stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, timeout=timeout)
+    text = proc.stdout.decode("utf-8", "replace")
+    try:
+        document = json.loads(text)
+    except ValueError as ex:
+        raise RuntimeError("utf16validate --json did not emit one parseable document "
+                           "(rc=%d): %s :: %s" % (proc.returncode, ex, text[:200]))
+    if not isinstance(document, dict):
+        raise RuntimeError("utf16validate --json emitted a %s, not an object"
+                           % type(document).__name__)
+
+    status = document.get("status")
+    if status != "ok":
+        error = document.get("error") or {}
+        raise RuntimeError("utf16validate --json reported status=%r code=%r message=%r"
+                           % (status, error.get("code"), error.get("message")))
     if proc.returncode != 0:
-        raise RuntimeError("rc=%d: %s" % (proc.returncode,
-                                          proc.stderr.decode("utf-8", "replace").strip()))
-    return int(proc.stdout.decode().split("errorCount = ")[1].split()[0])
+        raise RuntimeError("utf16validate exited %d despite status=ok" % proc.returncode)
+    if expect_operation is not None and document.get("operation") != expect_operation:
+        raise RuntimeError("utf16validate ran %r but %r was requested -- the flags and the "
+                           "pipeline disagree" % (document.get("operation"),
+                                                  expect_operation))
+    if require is not None and require not in document:
+        raise RuntimeError("utf16validate --json document is missing the required field %r "
+                           "(operation=%r)" % (require, document.get("operation")))
+    return document
+
+
+def parabix_count(binary, args, path, timeout):
+    return parabix_json(binary, args, path, timeout,
+                        require="error_count")["error_count"]
 
 
 def parabix_positions(binary, args, path, timeout):
-    proc = subprocess.run([binary] + args + [path], stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, timeout=timeout)
-    if proc.returncode != 0:
-        raise RuntimeError("rc=%d" % proc.returncode)
-    text = proc.stdout.decode("utf-8", "replace")
-    return sorted(int(line.split("=")[-1].strip(), 16)
-                  for line in text.splitlines() if line.startswith("errpos"))
+    key = "scan_positions" if "--scan-error-marks" in args else "positions"
+    document = parabix_json(binary, args, path, timeout, require=key)
+    return sorted(document[key])
 
 
 # The one scan-consumer symptom this benchmark tolerates, stated as a pure function so it can
