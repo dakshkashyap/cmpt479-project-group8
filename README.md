@@ -316,7 +316,7 @@ Reproducibility controls: `--seed`, `--cases`, `--max-units`, `--quick`, `--only
 
 Repair (P3–P6) is checked on every case in the odd-byte, degenerate-size, edge, reversed-pair,
 boundary and segment categories, plus every `--repair-every`-th case elsewhere; the broad
-repair campaign is separate work.
+repair campaign is [below](#comprehensive-repair-campaign).
 
 **Failure reproduction format.** A failing case prints the seed, case number, category,
 encoding, the raw bytes in hex (elided in the middle for large cases), the decoded code units,
@@ -365,6 +365,105 @@ A **targeted deterministic regression** (seed-independent, LE and BE) pins the d
 at exactly **4096** and **8192** code units: it asserts that the oracle and
 `--print-positions` still agree, that every count is still correct, and that any scan
 divergence still satisfies the narrow predicate above.
+
+### Comprehensive repair campaign
+
+[`scripts/test_utf16_repair.sh`](scripts/test_utf16_repair.sh) stays the focused
+smoke/regression gate for `--repair`: a few dozen hand-written fixtures with exact expected
+bytes, plus a small simdutf cross-check. The **campaign** on top of it is
+[`scripts/test_utf16_repair_comprehensive.sh`](scripts/test_utf16_repair_comprehensive.sh) —
+hundreds of cases, every one checked against `scripts/utf16_oracle.py` as the exact-output
+oracle, in UTF-16LE *and* UTF-16BE, across forced segment sizes, up to 1 MiB streams.
+
+```bash
+./scripts/test_utf16_repair_comprehensive.sh              # default (~1.5 min)
+./scripts/test_utf16_repair_comprehensive.sh --quick      # fast subset (~45 s)
+./scripts/test_utf16_repair_comprehensive.sh --seed 1234 --cases 200 --max-units 2000
+./scripts/test_utf16_repair_comprehensive.sh --section generated --only-case 57
+./scripts/test_utf16_repair_comprehensive.sh --no-simdutf # skip the differential
+```
+
+**Categories covered.** *Hand-curated, with expected bytes declared by hand and
+cross-checked against the oracle before the implementation is consulted* — valid: empty, one
+BMP unit, ASCII/BMP text, a supplementary pair, multiple pairs, multilingual text, an emoji
+ZWJ sequence, a pair at the beginning/middle/end, U+10FFFF, and `D800 DFFF` (a *valid* pair,
+not two errors); malformed: lone high, lone low, high-then-BMP, BMP-then-low, reversed
+low-high, `high high low` (only the first high is replaced), `high low low` (only the
+trailing low), two and four consecutive highs and lows, alternating valid/malformed, errors
+at the beginning/middle/end and all three at once, multiple separated malformed regions,
+every surrogate ill-formed, U+DBFF and U+DFFF, and malformed data inside multilingual text;
+odd-length: one-byte input, an odd byte after BMP / a valid pair / a lone high / a lone low /
+a reversed pair / a 4096-unit valid stream, and odd byte values **00, D8, DC, FD, FF** (each
+also after a lone high). *Generated, from an explicit seed* — valid-only, malformed-only,
+sparse and dense malformed, mixed BMP/supplementary, long runs of highs and of lows, reversed
+pairs, alternating pair/surrogate, odd-length streams, large streams, malformed clustered
+near boundaries, and malformed distributed across the file.
+
+**Boundary and segment-size coverage.** Offset 0, EOF, and code-unit offsets
+**7/8/9, 15/16/17, 31/32/33, 63/64/65, 127/128/129, 255/256/257, 511/512/513,
+4095/4096/4097, 8191/8192/8193**. At each: a valid pair split across the boundary, a lone
+high immediately before it, a lone low exactly on it, malformed units on both sides, a valid
+pair beside malformed units, and an odd trailing byte after a boundary-sized input. Every
+input up to 2048 code units is additionally repaired at `-segment-size=1`, `13` and `64` and
+must produce **byte-identical** output (P11).
+
+**Properties.** P1 impl bytes == oracle bytes · P2 scalar `errorCount(repair(x))==0` ·
+P3 `--simd` the same · P4 idempotence · P5 valid input unchanged · P6 even length preserved ·
+P7 odd length becomes length+1 · P8 output length always even · P9 each U+FFFD is `FD FF` in
+LE and `FF FD` in BE · P10 well-formed neighbours copied through · P11 identical across
+segment sizes · P12 repeated runs identical · P13 LE and BE repairs decode to the same code
+units · P14 replacement count equals the original `errorCount` under the odd-byte convention ·
+P15 no unpaired surrogate survives.
+
+**Large-file stress** (correctness and stability, *not* a benchmark — no throughput is
+claimed and no benchmark file is touched): deterministic 1 MiB valid-BMP, mixed-valid,
+sparse-malformed and dense-malformed streams, a stream with malformed units at the first,
+middle and final code-unit positions, and a 1 MiB odd-length stream. Each reports input
+bytes, output bytes, original error count, replacement count and the post-repair validation
+result.
+
+**simdutf differential.** Where `.deps/simdutf/singleheader` is present (from
+`./scripts/setup_clausecker_lemire.sh`) a small helper is compiled into the temporary
+directory and `--repair` is compared **byte for byte** against
+`simdutf::to_well_formed_utf16le` / `...be`, in both encodings, over valid, sparse, dense,
+boundary and large cases. **Odd-length inputs are not compared**: simdutf's API is
+`char16_t`-based and has no notion of an incomplete trailing byte, so this project's "drop
+the byte and append one U+FFFD" policy has no simdutf equivalent — those cases are reported
+as skipped and are still checked against the Python oracle. If simdutf is absent, or no C++
+compiler is on `PATH`, the differential is reported as skipped with the reason and the rest
+of the campaign still runs; nothing is downloaded or installed.
+
+**Determinism.** Every generated case comes from
+`random.Random("utf16-repair|<seed>|<index>|<category>")`, so it depends only on the seed,
+its index and its category. Controls: `--seed`, `--cases`, `--max-units`, `--quick`,
+`--only-case`, `--section`, `--no-simdutf`, `--bin`. A failure prints the seed, case number
+and category, encoding, segment size, input length, input hex (elided in the middle for large
+inputs), the decoded code units, the oracle's count and malformed positions, expected and
+actual repaired hex, the first differing byte offset, the post-repair validation counts, and
+an exact rerun command.
+
+**Expected behaviour:** every section passes. This suite has no xfail mechanism — any failure
+is a real failure.
+
+**Regression fixed: the UTF-16BE phantom-lookahead trailing byte.** This campaign found, and
+the kernel now fixes, a real defect in `UTF16ErrorMarksKernel`. The marker rule needs
+`isLow[k+1]`, which it read as the high byte of the next code unit at raw offset
+`2(k+1)+HB`. In UTF-16BE the high byte comes first (`HB = 0`), so for the last complete code
+unit that offset landed **exactly on an odd trailing byte** — and a trailing `0xDC`–`0xDF`
+then looked like a low surrogate and paired with a real final high surrogate. The
+consequences were a lone high that `--emit-error-marks` did not mark (one error where the
+scalar path reported two), no `--print-positions` output, and a `--repair` result that still
+contained the lone high, so `validate(repair(x)) != 0` and repair was not idempotent.
+UTF-16LE was never affected: there the lookahead reads the byte *after* the trailing one,
+which the pipeline zero-fills.
+
+The fix neutralises any lookahead byte that lands on an incomplete trailing byte, so such a
+byte can never take part in surrogate pairing. Non-final segments are untouched (their
+lookahead is genuine next-segment data), and the documented odd-byte rule is unchanged: the
+odd byte contributes one error, has no code-unit position, and repair discards it and appends
+one U+FFFD. A dedicated section of this suite now checks **all 256 trailing-byte values**
+after a final high surrogate — for U+D800, U+DA00 and U+DBFF, in both encodings, at
+`-segment-size` default/1/13/64 — covering the former trigger values 0xDC–0xDF explicitly.
 
 Extra confidence beyond the suite:
 
