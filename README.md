@@ -56,6 +56,7 @@ patches/    Milestone patches applied on top of the pinned Parabix revision
 scripts/    setup_parabix.sh (build) and test_utf16validate.sh (tests)
 docs/       Project plan and design/reference notes
 results/    Benchmark output (generated; large artifacts are git-ignored)
+datasets/   Controlled error-density datasets (generated; git-ignored)
 benchmarks/ Benchmark drivers / configurations
 src/        Project-local sources (kept out of the Parabix tree)
 tests/      Project-local test material (incl. tests/corpus/, the multilingual corpus)
@@ -804,6 +805,79 @@ Files are named
 `error_rate_percent`, `error_pattern`, `error_sites_injected`, `expected_error_count`,
 and a description of the injected errors. A *site* is one malformed construct, so the
 site count is not the error count (a reversed pair is one site but two errors).
+
+### Controlled error-density datasets
+
+`benchmarks/generate_utf16_benchmark.py` above injects errors at an approximate *rate* and
+then measures what it produced. [`scripts/generate_error_density_datasets.py`](scripts/generate_error_density_datasets.py)
+is the complementary tool: it produces a size × density matrix in which the malformed count
+is **exact and verified**, in **both encodings**, for reproducible experiments.
+
+**Purpose.** Inputs for later benchmarking and validation work. The generator measures
+nothing and touches no benchmark script or result.
+
+```bash
+./scripts/generate_error_density_datasets.sh              # the full matrix
+./scripts/generate_error_density_datasets.sh --quick      # small sizes, reduced sweep
+./scripts/generate_error_density_datasets.sh --sizes 64KiB,1MiB --densities 0,1,5
+./scripts/generate_error_density_datasets.sh --encodings utf16le --overwrite
+```
+
+**Layout.** Generated data is git-ignored (like `benchmarks/data/`) and reproducible from
+the seed:
+
+```
+datasets/error_density/
+    utf16le/errdens_<size>_d<density>pct.utf16le.bin
+    utf16be/errdens_<size>_d<density>pct.utf16be.bin
+    manifest.csv
+```
+
+`manifest.csv` has one row per file: `filename`, `encoding`, `size_bytes`, `code_units`,
+`target_density`, `actual_error_count`, `seed`. A narrow run (say `--quick`, or one density)
+keeps the rows of datasets that are still on disk rather than dropping them, and warns if it
+finds dataset files the manifest does not describe.
+
+**Options.** `--output-dir`, `--seed`, `--sizes`, `--densities`, `--encodings`,
+`--overwrite`, `--quick`, `--bin`. Without `--overwrite`, datasets that already exist are
+kept — but they are still re-verified, so a stale or hand-edited file is caught rather than
+silently reused.
+
+**Sizes.** 4 KiB, 16 KiB, 64 KiB, 256 KiB, 1 MiB, 4 MiB. `--quick` uses the three smallest.
+
+**Densities (percentages of code units, not bytes).** 0, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10,
+20 and 50. `--quick` uses a reduced sweep.
+
+**Rounding rule.** `target_errors = floor(code_units × density / 100 + 0.5)` — round half
+up — and the file contains *exactly* that many ill-formed code units. A small file at a small
+density can legitimately round to zero (for example 0.01 % of 2048 code units is 0.2 → 0);
+the generator prints a note when that happens, and the manifest records the actual count.
+
+**Deterministic seeds.** Everything derives from `--seed` (default 479). Each dataset is
+built from `random.Random("utf16-density|<seed>|<size>|<density>")`, so it depends only on
+the seed, its own size and its own density — never on what else ran in the same invocation
+or in what order. Re-running with the same arguments reproduces byte-identical files. The
+UTF-16LE and UTF-16BE files of a pair hold the same code units, so each is the byte swap of
+the other and both report identical diagnostics.
+
+**Content.** The valid base stream is realistic UTF-16 drawn word-by-word from ASCII,
+accented Latin, Greek, Cyrillic, Hebrew, Arabic, Devanagari, Gurmukhi, Thai, CJK, kana and
+Hangul, plus supplementary-plane characters and emoji (surrogate pairs) — not a repeating
+filler pattern.
+
+**Malformed insertion.** Errors come from six constructs — lone high, lone low, reversed
+pair, high-high, low-low, and a broken mixed run — chosen so their error counts sum exactly
+to the target. Each is written into its own slot of the stream with a deterministic offset,
+so the malformed units are spread approximately uniformly rather than clustered, and each is
+separated from its neighbours by at least one guard code unit so its error count is exactly
+what was intended. Where a construct would land on a surrogate pair, both halves of that pair
+are replaced together, so no unintended lone surrogate is ever created.
+
+**Verification.** Before any dataset is accepted, its error count is checked three ways — the
+scalar validator, `--simd`, and [`scripts/utf16_oracle.py`](scripts/utf16_oracle.py) — and
+all three must equal the target. Datasets are written to a temporary file first and only
+moved into place once verified, so a failing dataset is never left behind; any disagreement
+aborts the run.
 
 ## Clausecker–Lemire baseline
 
