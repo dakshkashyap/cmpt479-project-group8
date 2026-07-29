@@ -37,6 +37,10 @@ Only verified results are listed here:
 - A deterministic multilingual / emoji corpus (ten languages, emoji, supplementary
   planes, LE **and** BE) validates with zero errors on every path —
   [`docs/multilingual_emoji_corpus.md`](docs/multilingual_emoji_corpus.md).
+- Malformed and boundary coverage is checked as a cross-product: every fixture in
+  UTF-16LE **and** UTF-16BE, on scalar / `--simd` / errorMarks / two-level scan, at
+  segment sizes 1/13/64 — see
+  [Malformed and boundary suite](#malformed-and-boundary-suite).
 - A reproducible preliminary scalar/SIMD/thread-count benchmark is available.
 - Cross-architecture evaluation is **done on both hosts**: CSIL x86-64
   (`results/utf16_benchmark_csil_x86_64_summary.md`, SSE4.2/`westmere`) and Apple arm64
@@ -172,6 +176,77 @@ All fixtures of this suite are generated into a `mktemp` directory and removed o
 The one committed test corpus is `tests/corpus/` (small, valid, multilingual/emoji — see
 [Multilingual and emoji corpus](#multilingual-and-emoji-corpus)); everything else is
 generated.
+
+### Malformed and boundary suite
+
+Where the suites above each gate one path, this one is the **cross-product**: every
+fixture is built once as a code-unit sequence, then checked in **both encodings** across
+**all four validation paths**, at four segment sizes. A disagreement between any two of
+them fails here even if each individual suite still passes.
+
+```bash
+./scripts/test_utf16_malformed_boundaries.sh   # expect: "232 passed, 0 failed" (~2 min)
+```
+
+**Malformed categories covered**
+
+- **lone surrogates** — a lone high or low as the whole file, embedded in BMP text, at
+  the top of each range (U+DBFF / U+DFFF), as the first unit, as the last unit; two,
+  three and four consecutive highs; two, three and four consecutive lows; high followed
+  by BMP; BMP followed by low; a reversed low–high pair (also at offset 0);
+- **mixed valid and invalid** — a valid pair beside a lone high and beside a lone low (on
+  either side), the `high, high, low` trap (only the *first* high is ill-formed), its
+  `high, low, low` mirror, `low high low high` (the middle two are a *valid pair*, so it
+  is 2 errors, not 4), eight alternating valid/invalid runs, four ill-formed units in a
+  row, six consecutive lone highs, and malformed data at the beginning, the middle, the
+  end, and all three at once;
+- **byte-length failures** — a one-byte file, a one-byte file whose byte looks like a
+  surrogate lead (`0xD8`), an odd trailing byte after BMP data, after a valid surrogate
+  pair, after a lone high, after a lone low, after a reversed pair, and a large valid
+  input (8192 code units) plus one stray byte.
+
+**Odd trailing bytes in expected diagnostics.** A trailing byte with no partner is not a
+code unit, so it has no code-unit index. The suite asserts, on every path and at every
+segment size: `errorCount` = ill-formed code units **+ 1**, while the position list
+contains ill-formed **code-unit indices only** — an odd trailing byte never appears in it.
+A 1-byte file therefore reports `errorCount = 1` with an empty position list.
+
+**Boundary offsets covered.** A code unit is 2 bytes, so these code-unit offsets bracket
+the SIMD block boundaries in bytes:
+
+| Code-unit offsets | Brackets byte offset |
+| --- | --- |
+| 7, 8, 9 | 16 |
+| 15, 16, 17 | 32 |
+| 31, 32, 33 | 64 |
+| 63, 64, 65 | 128 (also the 64-code-unit LLmask group) |
+| 127, 128, 129 | 256 |
+| 255, 256, 257 | 512 |
+| 511, 512, 513 | 1024 |
+
+At each offset the suite places a valid pair straddling the boundary, a valid pair ending
+exactly at it, a valid pair starting exactly at it, a lone high on the low side, a lone low
+on the boundary, and two errors on opposite sides. It also covers the beginning and end of
+input (one-pair file, one-unit file, empty file, a pair at the very end, a dangling high as
+the last unit, a lone low as the first unit) and, at forced `-segment-size=1`, `13` and
+`64`, a **surrogate pair split across the segment boundary**, a **malformed high at the
+final unit of a segment**, and a **low at the first unit of a segment with no matching
+high** — at the first three multiples of each segment size.
+
+**LE and BE coverage.** Every fixture runs in UTF-16LE and, via `--be`, in UTF-16BE, from
+the same intended code-unit sequence. Both encodings must report the same count and the
+same code-unit positions (positions are code-unit indices, so they are endian-agnostic),
+and the BE bytes must be exactly the byte swap of the LE bytes.
+
+**Path agreement.** For each fixture, encoding and segment size, the suite requires
+scalar count = `--simd` count = `--emit-error-marks` count = the count reported by the
+two-level scan, and the `--scan-error-marks` position list = the expected positions; the
+linear `--print-positions` printer is compared as well. Expectations come from three
+independent layers that must agree *before* any kernel is consulted: hand-declared
+positions per fixture, a test-side oracle written from the definition of well-formedness,
+and `benchmarks/llmask_reference.py` run over the raw bytes of both encodings. A
+representative subset is finally run three times per encoding to confirm repeated runs are
+byte-for-byte deterministic.
 
 Extra confidence beyond the suite:
 
