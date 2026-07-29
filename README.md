@@ -248,6 +248,124 @@ and `benchmarks/llmask_reference.py` run over the raw bytes of both encodings. A
 representative subset is finally run three times per encoding to confirm repeated runs are
 byte-for-byte deterministic.
 
+### Independent oracle and deterministic fuzzing
+
+[`scripts/utf16_oracle.py`](scripts/utf16_oracle.py) is a standalone Python **oracle**: given
+raw bytes and an endianness it computes the code units, the ill-formed code-unit positions,
+the odd-trailing-byte flag, the total `errorCount`, and the **U+FFFD-repaired bytes**. It is
+written from the definition of UTF-16 well-formedness and shares no code with
+`utf16validate.cpp`, with `benchmarks/llmask_reference.py`, or with the scalar validator: it
+decodes left to right, letting a high surrogate consume the low surrogate after it, and calls
+any surrogate that no pair could consume ill-formed. `llmask_reference.py` reaches the same
+answer through a per-code-unit predicate instead, so the two agreeing is evidence rather than
+tautology. It is usable on its own:
+
+```bash
+python3 scripts/utf16_oracle.py --count FILE [--be]
+python3 scripts/utf16_oracle.py --positions FILE [--be]
+python3 scripts/utf16_oracle.py --repair FILE [--be] > repaired.bin
+python3 scripts/utf16_oracle.py --self-test        # 17 hand-worked vectors x LE/BE
+```
+
+**Diagnostic conventions** (identical to the rest of the project): positions are **code-unit
+indices**, so they are the same in LE and BE; an odd trailing byte adds **1** to `errorCount`
+and has **no position**; repair replaces each ill-formed code unit with U+FFFD in place; and an
+odd trailing byte is **discarded and replaced by one appended U+FFFD**, per
+[`docs/utf16_repair.md`](docs/utf16_repair.md).
+
+**How this differs from the boundary suite.** The
+[Malformed and boundary suite](#malformed-and-boundary-suite) is hand-curated: every case was
+chosen deliberately and its expected positions declared by hand. This one is *generated* —
+hundreds of cases nobody wrote down, with expectations taken from the oracle. They are
+complementary, and they use different reference implementations on purpose.
+
+```bash
+./scripts/test_utf16_oracle_fuzz.sh              # default: 200 cases (~1.5 min), passes
+./scripts/test_utf16_oracle_fuzz.sh --quick      # 40 smaller cases (~20 s), passes
+./scripts/test_utf16_oracle_fuzz.sh --seed 1234 --cases 400 --max-units 2000
+```
+
+**What is fuzzed.** Eighteen categories, cycled so every run covers all of them: valid BMP;
+valid supplementary (all surrogate pairs); mixed valid; lone highs; lone lows; reversed pairs;
+consecutive highs; consecutive lows; strict alternation of valid and malformed; odd byte
+lengths; empty; one-byte; tiny (1–4 units); medium random; large (4096–12288 units); malformed
+at the beginning, middle and end; malformed on the boundary offsets 15/16/17, 31/32/33,
+63/64/65, 127/128/129; and cases placed on forced segment boundaries, run at
+`-segment-size=1`, `13` and `64`.
+
+**Deterministic seeds.** Each case is generated from
+`random.Random("utf16-fuzz|<seed>|<index>|<category>")`, so a case depends only on the seed,
+its own index and its category — never on how many cases ran before it. The same `--seed`
+reproduces the same bytes anywhere, and `--only-case N` reproduces exactly one case.
+Reproducibility controls: `--seed`, `--cases`, `--max-units`, `--quick`, `--only-case`,
+`--repair-every`, `--bin`. The seed and full configuration are printed at start-up.
+
+**Properties checked**, every case, in UTF-16LE and UTF-16BE:
+
+| | Property |
+| --- | --- |
+| P1 | `oracle == scalar == --simd == --emit-error-marks == scan` counts |
+| P2 | `oracle == --print-positions == --scan-error-marks` positions |
+| P3 | oracle repaired bytes `== --repair` bytes, byte for byte |
+| P4 | `validate(repair(x)) == 0` |
+| P5 | `repair(repair(x)) == repair(x)` |
+| P6 | `x` well-formed ⇒ `repair(x) == x` |
+| P7 | LE and BE of the same code units give the same count and positions, and the BE bytes are the byte swap of the LE |
+| P8 | the same seed regenerates byte-identical cases |
+| P9 | repeated runs of the same path on the same file agree |
+
+Repair (P3–P6) is checked on every case in the odd-byte, degenerate-size, edge, reversed-pair,
+boundary and segment categories, plus every `--repair-every`-th case elsewhere; the broad
+repair campaign is separate work.
+
+**Failure reproduction format.** A failing case prints the seed, case number, category,
+encoding, the raw bytes in hex (elided in the middle for large cases), the decoded code units,
+the oracle's count and positions, what *each* implementation path returned, the first position
+at which the paths diverge, and a ready-to-paste rerun command:
+
+```
+python3 scripts/test_utf16_oracle_fuzz.py --seed 479 --only-case 32 --max-units 600
+```
+
+All generated fixtures live in a temporary directory that is removed on exit.
+
+**Known defect, classified as KNOWN-XFAIL.** The suite found one real defect in
+`--scan-error-marks`: on an input whose length is a **positive exact multiple of the
+4096-code-unit scan stride**, the two-level scan prints extra positions **past the end of
+the input**. Counts stay correct on every path — including the scan's own `errorCount`,
+which is what makes that output self-inconsistent — and `--print-positions` stays correct,
+so only the two-level scan's position stream is affected. No production code has been
+changed.
+
+So that the suite remains a usable regression gate, exactly this defect is reported as
+**KNOWN-XFAIL** and does not fail the run. It is not suppressed — it is printed, counted
+separately, and reproducible on demand:
+
+```bash
+./scripts/test_utf16_oracle_fuzz.sh --strict-known-defects   # reproduce it; exits non-zero
+```
+
+The final summary always separates the three outcomes, for example
+`2360 passed, 16 known-xfail, 0 failed` by default and
+`2360 passed, 0 known-xfail, 16 failed` under `--strict-known-defects`.
+
+**The classification is deliberately narrow.** A position mismatch is accepted as
+KNOWN-XFAIL only when *all* of the following hold: the property is **P2**;
+`--scan-error-marks` is the only disagreeing path; the oracle and `--print-positions` agree
+**exactly**; every validator count agrees; the input has an **even** byte length; the input
+is a **positive exact multiple of 4096** code units; no real position is missing from the
+scan output; and **every** unexpected scan position lies **outside** the valid code-unit
+range. Anything else is an ordinary failure: KNOWN-XFAIL never suppresses a count mismatch,
+a repair mismatch, a wrong `--print-positions` result, a missing scan position, an in-range
+spurious scan position, an odd-length input, or a length that is not a multiple of 4096.
+When a mismatch is rejected the report names the first condition that ruled it out, so a
+new defect cannot be absorbed into this bucket.
+
+A **targeted deterministic regression** (seed-independent, LE and BE) pins the defect down
+at exactly **4096** and **8192** code units: it asserts that the oracle and
+`--print-positions` still agree, that every count is still correct, and that any scan
+divergence still satisfies the narrow predicate above.
+
 Extra confidence beyond the suite:
 
 - **Single-thread vs. default threading must agree** (this also answers the
