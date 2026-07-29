@@ -185,7 +185,7 @@ fixture is built once as a code-unit sequence, then checked in **both encodings*
 them fails here even if each individual suite still passes.
 
 ```bash
-./scripts/test_utf16_malformed_boundaries.sh   # expect: "232 passed, 0 failed" (~2 min)
+./scripts/test_utf16_malformed_boundaries.sh   # approximately 2 minutes
 ```
 
 **Malformed categories covered**
