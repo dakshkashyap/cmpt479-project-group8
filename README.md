@@ -89,6 +89,62 @@ LLVM_DIR=/path/to/llvm/lib/cmake/llvm   ./scripts/setup_parabix.sh
 LLVM_CONFIG=/path/to/llvm-config         ./scripts/setup_parabix.sh
 ```
 
+## One-command research reproduction
+
+The whole artifact reproduces from a single command. It adds no functionality: it runs the
+environment checks, dataset verification, every regression suite and the benchmark campaign
+that already exist, then collects the results into one evidence directory.
+
+```bash
+./scripts/reproduce_research.sh --quick     # representative evidence, ~5 minutes
+./scripts/reproduce_research.sh --full      # the complete evaluation, see the runtime note
+./scripts/reproduce_research.sh --help
+```
+
+Options: `--quick`, `--full`, `--skip-tests`, `--skip-benchmarks`, `--skip-datasets`,
+`--force`, `--output-dir DIR`, `--seed N`, `--help`.
+
+**Prerequisites.** A built validator (`./scripts/setup_parabix.sh`) and the controlled
+datasets (`./scripts/generate_error_density_datasets.sh`). The script **never downloads or
+installs anything**, and **never regenerates datasets silently** — if they are missing it says
+exactly what is missing and stops, unless `--force` is given. Existing evidence is likewise
+never deleted without `--force`.
+
+**Expected outputs**, in `results/reproduction/`:
+
+```
+environment.json          run metadata: commit, branch, dirty, seed, binary, simdutf, timings
+system_information.json   OS, architecture, CPU model, logical CPUs, Python, free disk
+test_summary.json         per-suite PASS / KNOWN-XFAIL / FAIL
+benchmark.csv             raw per-iteration rows
+benchmark.json            environment + raw + aggregate
+aggregate.csv             per dataset/operation statistics
+benchmark_summary.md      the measured tables, correctness gate and limitations
+reproduction_report.md    the report: commands, environment, results, elapsed, PASS/FAIL
+```
+
+Raw CSV/JSON under `results/reproduction/` is git-ignored; the Markdown report and summary are
+not, so verified evidence can be committed.
+
+**Expected runtime.** `--quick` takes roughly five minutes on the development machine
+(regression suites dominate; the benchmark stage is under a minute). `--full` runs the
+complete 132-dataset matrix: its correctness gate alone measures about **7 minutes**, and it
+plans about **8800 measured runs**, so budget **roughly 30–60 minutes** depending on the
+machine. That figure is an estimate from measured parts, not a timed full run.
+
+**How to verify success.** The script exits `0` only if every stage that ran succeeded, and
+prints `reproduction PASSED`. `reproduction_report.md` ends with an overall PASS/FAIL, and
+`test_summary.json` carries `passed`, `known_xfail` and `failed` counts. A suite reporting
+KNOWN-XFAIL entries still passes — those are the documented issue #42 scan-consumer cases.
+
+**Known limitations** are restated in the generated report rather than duplicated here: the
+whole-process timing scope, the single-machine caveat, the synthetic corpus, and the issue #42
+scan-consumer note (extra positions past end-of-input, trigger dependent on error distribution
+rather than only on input length). The benchmark methodology, dataset semantics, validator,
+repair and oracle are untouched by this script — see
+[UTF-16 pipeline benchmark](#utf-16-pipeline-benchmark-validation-location-scan-repair) for
+what the campaign measures and how.
+
 ## Quick setup
 
 ```
