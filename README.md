@@ -520,6 +520,119 @@ Each prints, per input file:
 file.bin: errorCount = <number of ill-formed UTF-16 code units>
 ```
 
+### Machine-readable diagnostics (`--json`)
+
+For automation, benchmark tooling and reproducible experiments, `--json` emits **one JSON
+document per input file** instead of that line. `--json-pretty` is the same document,
+indented. **Human-readable output is unchanged unless one of these flags is given** — the
+existing line is byte-for-byte what it always was, and no validation, repair or scan
+behaviour changes. The flags work with every operation.
+
+```bash
+utf16validate --json file.bin                                      # validation
+utf16validate --json --simd file.bin                               # SIMD validation
+utf16validate --json --emit-error-marks file.bin                   # marker generation
+utf16validate --json --emit-error-marks --print-positions -thread-num=1 file.bin
+utf16validate --json --emit-error-marks --scan-error-marks -thread-num=1 file.bin
+utf16validate --json --repair file.bin                             # repair report
+utf16validate --json-pretty --be file.bin                          # indented, UTF-16BE
+```
+
+**Exactly one document, so exactly one input file.** A JSON run emits **one** complete
+document; it never concatenates a document per file, because the result would not parse as a
+whole. `--json` therefore **requires exactly one input file**. Zero or several files produce a
+single `status: "error"` document with code `json_requires_single_input` and a **non-zero exit
+status**. Multi-file human-readable behaviour is unchanged: without the flags, several files
+still print one line each and exit 0.
+
+**Schema overview.** Keys are stable, counts are JSON numbers, flags are JSON booleans, and
+lists are arrays — nothing important is encoded only inside a formatted string. Keys that do
+not apply are **omitted** rather than set to null.
+
+*Stable envelope — present in every document, success or failure:*
+
+| key | type |
+| --- | --- |
+| `version`, `tool`, `command`, `timestamp` | number / string |
+| `operation`, `status`, `encoding` | string |
+| `warnings` | array of strings (empty when none) |
+| `metadata` | `{implementation, big_endian, odd_trailing_byte}` |
+
+*Success-only — emitted only once the pipeline has actually run:*
+
+| key | type |
+| --- | --- |
+| `file` | string |
+| `size_bytes`, `code_units`, `error_count` | number |
+| `validation` | `{valid: bool, error_count: number}` |
+| `timing` | `{elapsed_seconds: number}` |
+
+*Operation-specific:*
+
+| key | type | present |
+| --- | --- | --- |
+| `error_marks` | `{mark_count: number}` | with `--emit-error-marks` |
+| `positions` | array of numbers | with `--print-positions` |
+| `scan_positions` | array of numbers | with `--scan-error-marks` |
+| `repair` | `{performed, replacement_count, output_valid}` | with `--repair` |
+
+*Failure-only:*
+
+| key | type |
+| --- | --- |
+| `error` | `{code: string, message: string}` |
+
+**Error codes** (branch on `code`, never on `message`): `json_requires_single_input`,
+`input_open_failed`, `capture_setup_failed`, `capture_read_failed`.
+
+A failure document **never carries `validation` or `error_count`**, so a document describing a
+run that never happened can never be mistaken for a clean validation. It still carries `file`
+when known. `size_bytes` and `code_units` may be **`null` in a failure document** — the single
+documented exception, meaning "genuinely unknown" rather than a misleading `0` or `-1`.
+
+`validation.valid` is `true` with `error_count` 0 for well-formed input and `false` with the
+count otherwise. Position arrays are **empty arrays**, never missing or null, when there is
+nothing to report. `mark_count` counts marker bits, so it excludes an odd trailing byte —
+which has no code-unit position but does count toward `error_count`.
+
+**Option precedence.** When several operation flags are combined the pipeline picks one, and
+the reported `operation` always names the one that actually ran: **repair > scan > linear
+positions > error marks > `--simd` > scalar**. So `--print-positions --scan-error-marks`
+together run the scan and report `operation: "locate_scan"` with `scan_positions`; adding
+`--repair` reports `repair`. This precedence is tested, not incidental.
+
+**Failure handling.** If the tool cannot open the input, or cannot set up or read back the
+capture it needs (`tmpfile`, `dup`, `dup2`, or the read), it emits a `status: "error"` document
+with the relevant code and exits non-zero. It never reports `status: "ok"` with
+`error_count: 0` for a run that did not complete, and never returns an empty `positions` array
+or a `repair` report when the underlying output could not be read.
+
+**Repair reports, it does not embed bytes.** `--json --repair` writes only the JSON document
+to stdout and reports `performed`, `replacement_count` and `output_valid`; the repaired binary
+is **not** included (a warning in the document says so). Run `--repair` *without* `--json` to
+get the repaired bytes on stdout, exactly as before.
+
+```json
+{
+  "version": 1, "tool": "utf16validate", "operation": "validate_simd", "status": "ok",
+  "encoding": "UTF-16LE", "file": "bad.bin", "size_bytes": 8, "code_units": 4,
+  "error_count": 2, "validation": { "valid": false, "error_count": 2 },
+  "timing": { "elapsed_seconds": 0.000158375 }, "warnings": [],
+  "metadata": { "implementation": "parabix_simd", "big_endian": false,
+                "odd_trailing_byte": false }
+}
+```
+
+**Intended use.** Automation should read these fields instead of parsing the human-readable
+line. The issue #45 benchmark driver's correctness gate already does: it takes counts and
+position arrays straight from `--json`, so there is no text format to get wrong. Its *timed*
+runs deliberately do **not** use `--json`, because that would change what is being measured;
+the benchmark methodology is unchanged.
+
+```bash
+./scripts/test_utf16_json_output.sh      # schema, types, empty arrays, all operations, LE+BE
+```
+
 ## Thread testing
 
 Parabix's threading is controlled per run (no measured speedups are claimed yet):
