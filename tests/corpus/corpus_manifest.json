@@ -1,0 +1,648 @@
+{
+  "schema_version": 1,
+  "generator": "scripts/generate_multilingual_corpus.py",
+  "issue": 40,
+  "profile": "fixtures",
+  "seed": 479,
+  "target_code_units": 512,
+  "encodings": [
+    "UTF-16LE",
+    "UTF-16BE"
+  ],
+  "byte_order_mark": false,
+  "validates_as": "UTF-16 well-formedness (surrogate structure); grapheme and emoji semantics are explicitly out of scope",
+  "expected_error_count": 0,
+  "total_bytes": 36380,
+  "datasets": [
+    {
+      "dataset": "empty",
+      "description": "Empty input: zero bytes, zero code units",
+      "source_category": "degenerate",
+      "seed": null,
+      "generated_by_repetition": false,
+      "bytes": 0,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "empty.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "utf16be": {
+          "file": "empty.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "code_points": 0,
+      "bmp_code_points": 0,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 0
+    },
+    {
+      "dataset": "minimal_ascii",
+      "description": "Single ASCII code point (one code unit)",
+      "source_category": "degenerate",
+      "seed": null,
+      "generated_by_repetition": false,
+      "bytes": 2,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "minimal_ascii.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 2,
+          "sha256": "e61c21ca716b3b1aefb7d1198f83679c4ca4d596e5792275dd6203b49216237d"
+        },
+        "utf16be": {
+          "file": "minimal_ascii.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 2,
+          "sha256": "c00b4d3c929cb5cc316691ed4636f634576f2c9b2954767234c5274e9dde185d"
+        }
+      },
+      "code_points": 1,
+      "bmp_code_points": 1,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 1
+    },
+    {
+      "dataset": "minimal_bmp",
+      "description": "Three BMP code points from three scripts (three code units)",
+      "source_category": "degenerate",
+      "seed": null,
+      "generated_by_repetition": false,
+      "bytes": 6,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "minimal_bmp.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 6,
+          "sha256": "a029c337efe29ef3ef9b903dd650fe2f17b4300b849dec3eba481f2cf8e3424f"
+        },
+        "utf16be": {
+          "file": "minimal_bmp.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 6,
+          "sha256": "8149a484d808e545a0bfbe2550e6e1b52aeb812cffe1fc5d7153e7733f847291"
+        }
+      },
+      "code_points": 3,
+      "bmp_code_points": 3,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 3
+    },
+    {
+      "dataset": "emoji_single",
+      "description": "A single non-BMP emoji: exactly one surrogate pair, nothing else",
+      "source_category": "emoji",
+      "seed": null,
+      "generated_by_repetition": false,
+      "bytes": 4,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "emoji_single.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 4,
+          "sha256": "81c96284b596ed3155a3f0f11da0dd13494dc91618323a3bff4c9701229015cc"
+        },
+        "utf16be": {
+          "file": "emoji_single.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 4,
+          "sha256": "d4e887a680e68155b74f6002df62c2e8da129f928162f0e44ab3025f7653134f"
+        }
+      },
+      "code_points": 1,
+      "bmp_code_points": 0,
+      "supplementary_code_points": 1,
+      "surrogate_pairs": 1,
+      "code_units": 2
+    },
+    {
+      "dataset": "english_ascii",
+      "description": "English text, ASCII only",
+      "source_category": "language",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1108,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "english_ascii.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1108,
+          "sha256": "37b8b1b59eae3bdaef112a3ec76704371e80983f2ad9194786cb5f469e4a354b"
+        },
+        "utf16be": {
+          "file": "english_ascii.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1108,
+          "sha256": "3a34add95fbfadf0e681cd6ea49ad94238fa76d7a52266b3cf7a11303c6ce021"
+        }
+      },
+      "code_points": 554,
+      "bmp_code_points": 554,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 554
+    },
+    {
+      "dataset": "latin_accented",
+      "description": "Accented Latin (Latin-1 Supplement and Latin Extended-A)",
+      "source_category": "language",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1106,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "latin_accented.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1106,
+          "sha256": "c153296968765b93d7302df3d8f2821bb75b57476d8d93bccd1eba8bb0a63491"
+        },
+        "utf16be": {
+          "file": "latin_accented.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1106,
+          "sha256": "28d0460ace7edef8090c13b6b431e3946dc9f0505e62d17a413f42e29c5023d6"
+        }
+      },
+      "code_points": 553,
+      "bmp_code_points": 553,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 553
+    },
+    {
+      "dataset": "punjabi",
+      "description": "Punjabi in the Gurmukhi script",
+      "source_category": "language",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1106,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "punjabi.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1106,
+          "sha256": "60d27d5373da0aa91ab692d9df300d680713f8d879360e0fac0e1cd10b8d1432"
+        },
+        "utf16be": {
+          "file": "punjabi.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1106,
+          "sha256": "d6fd4ea8ea209507ee64dc04d3fe4f3bb21145b1ac92f5d1aba820cdc574aefa"
+        }
+      },
+      "code_points": 553,
+      "bmp_code_points": 553,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 553
+    },
+    {
+      "dataset": "hindi",
+      "description": "Hindi in the Devanagari script",
+      "source_category": "language",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1036,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "hindi.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1036,
+          "sha256": "f8c85c62bea0d6251a7cf0c9da42a47cfbe47bfa90f2490438cad2347546228b"
+        },
+        "utf16be": {
+          "file": "hindi.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1036,
+          "sha256": "55c5cf46ed4461aede0ba03a26024262345a363b80822939c6f0aa2f9cc3362b"
+        }
+      },
+      "code_points": 518,
+      "bmp_code_points": 518,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 518
+    },
+    {
+      "dataset": "arabic",
+      "description": "Arabic, a right-to-left script",
+      "source_category": "language",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1076,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "arabic.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1076,
+          "sha256": "4169b26ac043b6ede61114c98ff1467f3d461146801612a8b584043593e28db7"
+        },
+        "utf16be": {
+          "file": "arabic.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1076,
+          "sha256": "9e9c231650d4e83a8b851a18a843ecd24a6b0befa77c7bdb887f848d601bb41b"
+        }
+      },
+      "code_points": 538,
+      "bmp_code_points": 538,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 538
+    },
+    {
+      "dataset": "hebrew",
+      "description": "Hebrew, a right-to-left script",
+      "source_category": "language",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1034,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "hebrew.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1034,
+          "sha256": "d90cb9a5eebdb51f531b971351b57ec780d945e5c50e2580bb40934a85e6dd86"
+        },
+        "utf16be": {
+          "file": "hebrew.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1034,
+          "sha256": "73b8df7e1f4bc76be9269d0c3ba72e4662f007df031cb5dcd07c87614923cffa"
+        }
+      },
+      "code_points": 517,
+      "bmp_code_points": 517,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 517
+    },
+    {
+      "dataset": "chinese",
+      "description": "Chinese Han ideographs (BMP)",
+      "source_category": "language",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1034,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "chinese.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1034,
+          "sha256": "ed164bd3e6ed84936b19c8c2179a5da4cb49fc37f9cf55750c230e34272f6231"
+        },
+        "utf16be": {
+          "file": "chinese.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1034,
+          "sha256": "d5fe9f5713f8e094b5de66666658893e2f1b02e575e1a3e278e65a15710b08cb"
+        }
+      },
+      "code_points": 517,
+      "bmp_code_points": 517,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 517
+    },
+    {
+      "dataset": "japanese",
+      "description": "Japanese hiragana, katakana and kanji",
+      "source_category": "language",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1042,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "japanese.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1042,
+          "sha256": "a5bbfe80e109945c0d6742a49ee2012bd4ebe705cfb5fbfff37a7d6f913b7dc2"
+        },
+        "utf16be": {
+          "file": "japanese.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1042,
+          "sha256": "ad500304f4eb2197ca43d128bac164fdd7f46f206fcfe8455e8f16fc4e45a397"
+        }
+      },
+      "code_points": 521,
+      "bmp_code_points": 521,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 521
+    },
+    {
+      "dataset": "korean",
+      "description": "Korean Hangul syllables (U+AC00..U+D7A3, immediately below the surrogate block)",
+      "source_category": "language",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1032,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "korean.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1032,
+          "sha256": "db44b10768f617397917a23677aefe478596384860ff9386ae110588837bbd45"
+        },
+        "utf16be": {
+          "file": "korean.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1032,
+          "sha256": "3f22455e1e9c2dfb66fb1fa9bdc85798a4ce9dac26c21abd09eab55da77f37c9"
+        }
+      },
+      "code_points": 516,
+      "bmp_code_points": 516,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 516
+    },
+    {
+      "dataset": "thai",
+      "description": "Thai, unspaced with combining vowel signs and tone marks",
+      "source_category": "language",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1024,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "thai.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1024,
+          "sha256": "0dac365408b024928913ccb7705751bc48c81e81b97999035ff3a88ae365086a"
+        },
+        "utf16be": {
+          "file": "thai.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1024,
+          "sha256": "6828ceef99b57b7910f2182a23e18116aff2146102c03f27a863940ab2554779"
+        }
+      },
+      "code_points": 512,
+      "bmp_code_points": 512,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 512
+    },
+    {
+      "dataset": "mixed_multilingual",
+      "description": "Paragraphs from all ten languages, plus lines that interleave them",
+      "source_category": "mixed",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1042,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "mixed_multilingual.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1042,
+          "sha256": "ffe09b89a4c0d0ce958a049d5e4886bd37a7a3cad05de957feca14e7cd566dd6"
+        },
+        "utf16be": {
+          "file": "mixed_multilingual.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1042,
+          "sha256": "bb2bc7b31e9eee42bc0b2be9370e82826e737f9c0f1782839d0a41ce0cbd505a"
+        }
+      },
+      "code_points": 521,
+      "bmp_code_points": 521,
+      "supplementary_code_points": 0,
+      "surrogate_pairs": 0,
+      "code_units": 521
+    },
+    {
+      "dataset": "emoji_heavy",
+      "description": "Emoji-dense text: mostly supplementary-plane emoji (surrogate pairs) with some BMP emoji and ASCII",
+      "source_category": "emoji",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1074,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "emoji_heavy.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1074,
+          "sha256": "5ed48c5aa42916c37140f8056fe4ad9611478843a1d1c70bd02fa3d75cd28ac2"
+        },
+        "utf16be": {
+          "file": "emoji_heavy.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1074,
+          "sha256": "ae2bc45a18791442cf3b77b9cd57ffdcfb4519d7628ef65293eabace8c24c843"
+        }
+      },
+      "code_points": 378,
+      "bmp_code_points": 219,
+      "supplementary_code_points": 159,
+      "surrogate_pairs": 159,
+      "code_units": 537
+    },
+    {
+      "dataset": "emoji_skin_tone",
+      "description": "Emoji modifier (Fitzpatrick) sequences on supplementary and BMP bases",
+      "source_category": "emoji",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1036,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "emoji_skin_tone.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1036,
+          "sha256": "c6117a3476bf84e0685306973b59fcab23c35d82cdd8b8434de23fb0b407072d"
+        },
+        "utf16be": {
+          "file": "emoji_skin_tone.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1036,
+          "sha256": "fe552d8bdd33ee1991aa0e150cddc6950b729a5fe3a696d9f6622d1b584cd4db"
+        }
+      },
+      "code_points": 335,
+      "bmp_code_points": 152,
+      "supplementary_code_points": 183,
+      "surrogate_pairs": 183,
+      "code_units": 518
+    },
+    {
+      "dataset": "emoji_flags",
+      "description": "Regional-indicator flag pairs and tag-sequence flags (long runs of consecutive surrogate pairs)",
+      "source_category": "emoji",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1154,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "emoji_flags.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1154,
+          "sha256": "354ed9da070a1a7cf9402668820be28b19ccb11e161ecdeaaa16e6b8671a6101"
+        },
+        "utf16be": {
+          "file": "emoji_flags.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1154,
+          "sha256": "f2a2411cd7b86247e0d7fed237497dd24715dd9839005fa3e3573cdc9d2c402e"
+        }
+      },
+      "code_points": 381,
+      "bmp_code_points": 185,
+      "supplementary_code_points": 196,
+      "surrogate_pairs": 196,
+      "code_units": 577
+    },
+    {
+      "dataset": "variation_selectors",
+      "description": "Variation selectors U+FE0E/U+FE0F, keycap sequences, and supplementary-plane ideographic variation selectors (U+E0100+)",
+      "source_category": "emoji",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1084,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "variation_selectors.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1084,
+          "sha256": "8e7a2d8898e1f8d020de3fe0bd4fab4507280f0a109169391907ba17c1f88257"
+        },
+        "utf16be": {
+          "file": "variation_selectors.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1084,
+          "sha256": "41fe3b77b8fc087b24eee9708cab6e92f98079e74710c6c4a6ad613533cadba0"
+        }
+      },
+      "code_points": 530,
+      "bmp_code_points": 518,
+      "supplementary_code_points": 12,
+      "surrogate_pairs": 12,
+      "code_units": 542
+    },
+    {
+      "dataset": "emoji_zwj",
+      "description": "ZWJ family and profession sequences: supplementary-plane people joined by the BMP joiner U+200D, some with skin tone modifiers",
+      "source_category": "emoji",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1066,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "emoji_zwj.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1066,
+          "sha256": "64a3d6c233f304f93db80b2f1ff2caf7e9fc2d1153d329c33291c18aa05afa16"
+        },
+        "utf16be": {
+          "file": "emoji_zwj.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1066,
+          "sha256": "cb3649098daf774765872988dd1fae44602fc33fc76bd84d4ee763299f9e1a6e"
+        }
+      },
+      "code_points": 486,
+      "bmp_code_points": 439,
+      "supplementary_code_points": 47,
+      "surrogate_pairs": 47,
+      "code_units": 533
+    },
+    {
+      "dataset": "plane_mix",
+      "description": "BMP text, non-emoji supplementary-plane characters (CJK Ext B, Deseret, Gothic, Linear B, Cuneiform, hieroglyphs, math, music) and emoji in the same lines",
+      "source_category": "mixed",
+      "seed": 479,
+      "generated_by_repetition": true,
+      "bytes": 1124,
+      "expected_error_count": 0,
+      "files": {
+        "utf16le": {
+          "file": "plane_mix.utf16le.bin",
+          "encoding": "UTF-16LE",
+          "byte_order_mark": false,
+          "bytes": 1124,
+          "sha256": "92ad9d169c5eb89c2a1e37d0b2d68e49e2747a069a78b0cab850f8166d4f060e"
+        },
+        "utf16be": {
+          "file": "plane_mix.utf16be.bin",
+          "encoding": "UTF-16BE",
+          "byte_order_mark": false,
+          "bytes": 1124,
+          "sha256": "1c560b8a0a2d644ba13a26a8ae162371ecb748826513557e02612211f0323f07"
+        }
+      },
+      "code_points": 477,
+      "bmp_code_points": 392,
+      "supplementary_code_points": 85,
+      "surrogate_pairs": 85,
+      "code_units": 562
+    }
+  ]
+}

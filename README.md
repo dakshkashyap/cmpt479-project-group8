@@ -34,6 +34,9 @@ Only verified results are listed here:
   surrogate pairs and malformed sequences crossing a SIMD block boundary, odd
   trailing byte after a large input).
 - Forced segment-size tests (`-segment-size=1,13,64`) pass.
+- A deterministic multilingual / emoji corpus (ten languages, emoji, supplementary
+  planes, LE **and** BE) validates with zero errors on every path —
+  [`docs/multilingual_emoji_corpus.md`](docs/multilingual_emoji_corpus.md).
 - A reproducible preliminary scalar/SIMD/thread-count benchmark is available.
 - Cross-architecture evaluation is **done on both hosts**: CSIL x86-64
   (`results/utf16_benchmark_csil_x86_64_summary.md`, SSE4.2/`westmere`) and Apple arm64
@@ -51,7 +54,7 @@ docs/       Project plan and design/reference notes
 results/    Benchmark output (generated; large artifacts are git-ignored)
 benchmarks/ Benchmark drivers / configurations
 src/        Project-local sources (kept out of the Parabix tree)
-tests/      Project-local test material
+tests/      Project-local test material (incl. tests/corpus/, the multilingual corpus)
 .deps/      Local Parabix checkout, created by setup (git-ignored, never committed)
 ```
 
@@ -165,8 +168,10 @@ produce (lone surrogates, odd trailing bytes). Grouped coverage:
 - **forced pipeline segment sizes** (`-segment-size=1,13,64`) that stress the
   cross-segment carry, and **deterministic randomized inputs**.
 
-All fixtures are generated into a `mktemp` directory and removed on exit; no test
-data is committed.
+All fixtures of this suite are generated into a `mktemp` directory and removed on exit.
+The one committed test corpus is `tests/corpus/` (small, valid, multilingual/emoji — see
+[Multilingual and emoji corpus](#multilingual-and-emoji-corpus)); everything else is
+generated.
 
 Extra confidence beyond the suite:
 
@@ -427,6 +432,39 @@ lives in `benchmarks/data/` and is git-ignored.
 
 The benchmark runner currently measures the `default` dataset; wiring the
 multilingual datasets into the timed runs is tracked separately.
+
+### Multilingual and emoji corpus
+
+A separate, **committed** corpus of valid UTF-16 fixtures lives in `tests/corpus/`, in
+**both UTF-16LE and UTF-16BE** — see
+[`docs/multilingual_emoji_corpus.md`](docs/multilingual_emoji_corpus.md). It covers ten
+languages (English, accented Latin, Punjabi, Hindi, Arabic, Hebrew, Chinese, Japanese,
+Korean, Thai), mixed multilingual paragraphs, emoji (a single pair, emoji-dense text,
+skin tone modifiers, flags including tag sequences, variation selectors, ZWJ family and
+profession sequences), non-emoji supplementary-plane characters, and the degenerate empty
+and one-code-unit inputs. Every file validates with `errorCount = 0`; this corpus adds no
+malformed data (that is what the error patterns above are for).
+
+It tests **UTF-16 well-formedness — surrogate structure — not grapheme or emoji
+semantics**. A ZWJ family sequence is interesting here because it alternates surrogate
+pairs with BMP joiners, not because it should render as one glyph.
+
+```bash
+python3 scripts/generate_multilingual_corpus.py          # regenerate tests/corpus
+python3 scripts/generate_multilingual_corpus.py --check   # verify, writing nothing
+./scripts/test_multilingual_corpus.sh                     # 48/48, LE + BE, zero errors
+
+# benchmark-sized version (git-ignored), and the same suite against it
+python3 scripts/generate_multilingual_corpus.py --profile bench --size-mib 8
+CORPUS_DIR="$PWD/benchmarks/data/multilingual_corpus" ./scripts/test_multilingual_corpus.sh
+```
+
+Files are written with the explicit `utf-16-le` / `utf-16-be` codecs, so there is **no
+BOM**; the BE file is exactly the byte swap of the LE file. `tests/corpus/corpus_manifest.json`
+records, per dataset, the byte size, code-unit count, code-point count, surrogate-pair
+count, source category, seed, SHA-256 and `expected_error_count: 0` — all of which the
+suite checks against the bytes on disk, along with reproducibility (two generator runs must
+be byte-identical to each other and to the committed fixtures).
 
 ### Malformed datasets with controlled error rates
 
