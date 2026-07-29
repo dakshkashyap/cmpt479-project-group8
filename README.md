@@ -331,12 +331,22 @@ python3 scripts/test_utf16_oracle_fuzz.py --seed 479 --only-case 32 --max-units 
 All generated fixtures live in a temporary directory that is removed on exit.
 
 **Known defect, classified as KNOWN-XFAIL.** The suite found one real defect in
-`--scan-error-marks`: on an input whose length is a **positive exact multiple of the
-4096-code-unit scan stride**, the two-level scan prints extra positions **past the end of
-the input**. Counts stay correct on every path — including the scan's own `errorCount`,
+`--scan-error-marks`: the two-level scan prints extra positions **past the end of the
+input**. Counts stay correct on every path — including the scan's own `errorCount`,
 which is what makes that output self-inconsistent — and `--print-positions` stays correct,
 so only the two-level scan's position stream is affected. No production code has been
 changed.
+
+**Scope of the trigger.** This fuzz campaign first exposed the defect on inputs whose
+code-unit count is a **positive exact multiple of the 4096-unit scan stride**, and the
+KNOWN-XFAIL predicate below is pinned to exactly those regression cases. Later
+controlled-density testing (the issue #45 benchmark gate) showed the **trigger is broader and
+depends on the error distribution, not only the input length**: a 2048-code-unit dataset
+reproduces the symptom while a 32768-code-unit one does not. So the exact-multiple condition
+below describes *this driver's pinned cases*, not the boundary of the defect —
+**KNOWN-XFAIL here is not evidence that other inputs are unaffected.** The benchmark gate
+therefore classifies by symptom rather than by size; see
+[UTF-16 pipeline benchmark](#utf-16-pipeline-benchmark-validation-location-scan-repair).
 
 So that the suite remains a usable regression gate, exactly this defect is reported as
 **KNOWN-XFAIL** and does not fail the run. It is not suppressed — it is printed, counted
@@ -350,8 +360,9 @@ The final summary always separates the three outcomes, for example
 `2360 passed, 16 known-xfail, 0 failed` by default and
 `2360 passed, 0 known-xfail, 16 failed` under `--strict-known-defects`.
 
-**The classification is deliberately narrow.** A position mismatch is accepted as
-KNOWN-XFAIL only when *all* of the following hold: the property is **P2**;
+**The classification is deliberately narrow**, and intentionally narrower than the defect
+itself. A position mismatch is accepted as KNOWN-XFAIL only when *all* of the following hold:
+the property is **P2**;
 `--scan-error-marks` is the only disagreeing path; the oracle and `--print-positions` agree
 **exactly**; every validator count agrees; the input has an **even** byte length; the input
 is a **positive exact multiple of 4096** code units; no real position is missing from the
@@ -878,6 +889,106 @@ scalar validator, `--simd`, and [`scripts/utf16_oracle.py`](scripts/utf16_oracle
 all three must equal the target. Datasets are written to a temporary file first and only
 moved into place once verified, so a failing dataset is never left behind; any disagreement
 aborts the run.
+
+### UTF-16 pipeline benchmark (validation, location, scan, repair)
+
+`benchmarks/run_utf16_benchmark.py` answers one question — scalar vs Parabix SIMD vs simdutf
+*validation* throughput. [`benchmarks/benchmark_utf16_pipeline.py`](benchmarks/benchmark_utf16_pipeline.py)
+is a separate campaign along a different axis: it measures **each processing path
+independently** against the controlled error-density corpus above, so the cost of validation,
+marker generation, error location, scan-based location and repair can be compared at a
+*known, exact* malformed-unit density.
+
+**How issue #44 feeds this.** The datasets and their `manifest.csv` are the input. The
+benchmark reads sizes, densities, code-unit counts and `actual_error_count` **from the
+manifest**, never inferring them from filenames, and fails with an explicit message if a
+manifest row or its file is missing. It never generates datasets itself — run
+`./scripts/generate_error_density_datasets.sh` first.
+
+```bash
+./scripts/generate_error_density_datasets.sh --quick        # prerequisite datasets
+./benchmarks/benchmark_utf16_pipeline.sh --quick --overwrite        # fast subset
+./benchmarks/benchmark_utf16_pipeline.sh --quick --estimate-only    # gate + estimate only
+./benchmarks/benchmark_utf16_pipeline.sh --overwrite                # full matrix (slow)
+python3 benchmarks/plot_utf16_pipeline_benchmark.py                 # charts from the raw CSV
+```
+
+**Operations measured** (each timed on its own — never combined into one measurement):
+`validate_scalar`, `validate_simd`, `emit_error_marks` (marker generation), `locate_linear`
+(`--print-positions`), `locate_scan` (`--scan-error-marks`), `repair`, plus `simdutf_validate`
+and `simdutf_repair` where available. Position-printing and repair paths still write all of
+their output; stdout is redirected to the null sink so terminal I/O is never timed.
+
+**Options:** `--dataset-dir`, `--manifest`, `--bin`, `--output`, `--summary`, `--sizes`,
+`--densities`, `--encodings`, `--operations`, `--iterations`, `--warmups`, `--seed`,
+`--quick`, `--no-simdutf`, `--cpu-affinity`, `--timeout`, `--overwrite`, `--estimate-only`.
+Quick mode uses a documented subset (3 sizes × 2 densities × both encodings, fewer
+iterations); the full matrix is every row of the manifest.
+
+**Timing methodology.** Whole-process wall clock (`time.perf_counter_ns`), warm-up runs
+followed by measured iterations, **every raw iteration recorded**, median as the headline
+statistic with min/max/mean/stddev alongside. Throughput comes from **input bytes on disk**,
+never code units. Operation order is rotated per dataset, deterministically from `--seed`.
+Each implementation's fixed per-process cost is measured once on a tiny input; an
+overhead-adjusted throughput is reported **only** where the measurement is at least 3× that
+cost, because below that the correction is dominated by its own noise. Helper compilation and
+dataset generation happen before any measurement and are never timed. Non-zero exits and
+timeouts are recorded as failures, never silently dropped.
+
+**Correctness gate.** Before a dataset is timed, scalar, `--simd`, `--emit-error-marks`, the
+Python oracle, `--print-positions` and `--scan-error-marks` must agree with the manifest's
+`actual_error_count`, positions must match the oracle exactly, and `--repair` output must
+equal the oracle's repaired bytes and re-validate to zero errors. **No timing row is written
+for a path that fails its gate.**
+
+One known scan-consumer symptom is tolerated, and it is identified **by symptom, never by
+input size**: `--scan-error-marks` reports extra positions **beyond end-of-input** while the
+oracle and `--print-positions` agree exactly, no real position is missing, and the scan's own
+`errorCount` is still correct. A dataset showing exactly that is excluded from **`locate_scan`
+timing only** — every other operation on it is still measured — and the reason is recorded in
+the CSV, the JSON and the summary. **Anything else aborts the run**: a missing real position,
+an extra position inside the valid code-unit range, a count disagreement, a wrong
+`--print-positions` result, or a difference with no extra position at all.
+
+This is deliberately *not* stated as issue #42's exact-multiple-of-4096 size condition. The
+controlled-density corpus shows the trigger is broader than that and depends on the error
+distribution: a **2048**-code-unit dataset reproduces the symptom while a **32768**-code-unit
+one does not. The predicate and both of those real datasets (in each encoding) are covered by
+a self-test that needs no timing:
+
+```bash
+./benchmarks/benchmark_utf16_pipeline.sh --self-test-gate
+```
+
+**simdutf** is used from the repository's existing `.deps/simdutf` checkout and compiled once
+before measurement. Nothing is downloaded. If it is missing, or no C++ compiler is present,
+those rows are marked skipped with the reason and the Parabix paths are still benchmarked.
+simdutf validation returns a boolean where Parabix returns a count, and simdutf repair is
+compared only on even-length inputs — its `char16_t` API has no odd-trailing-byte concept.
+
+**Outputs** (`results/*.csv` and `*.json` are git-ignored; the Markdown summary is committed):
+
+```
+results/utf16_pipeline_benchmark.csv            raw, one row per measured iteration
+results/utf16_pipeline_benchmark_aggregate.csv  per dataset/operation statistics
+results/utf16_pipeline_benchmark.json           environment + raw + aggregate
+results/utf16_pipeline_benchmark_summary.md     human-readable summary
+results/utf16_pipeline_graphs/                  charts, when matplotlib is present
+```
+
+Existing result files are never overwritten without `--overwrite` (or a different
+`--output`/`--summary` path, e.g. a timestamped run directory).
+
+**Charts** come only from the raw CSV. matplotlib is **not** a dependency of this repository:
+if it is absent the chart step reports itself as skipped and installs nothing.
+
+**Interpretation cautions.** Whole-process timing includes process start-up and, for Parabix,
+loading the compiled pipeline — on the machine used so far that is tens of milliseconds, which
+*exceeds the work* for inputs up to at least 1 MiB, so at those sizes the raw numbers are
+process throughput rather than kernel throughput. The summary states this from the measured
+data and declines to rank kernels on it. Any committed summary is **machine-specific evidence
+from one run on one machine, not a universal claim**; reproduce it locally before relying on
+it. No benchmark numbers are hardcoded in this README.
 
 ## Clausecker–Lemire baseline
 
