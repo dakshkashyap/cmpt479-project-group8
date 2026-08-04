@@ -508,7 +508,11 @@ GATE_SELF_TESTS = [
 
 def self_test_gate(binary, dataset_dir, timeout):
     """Prove the exclusion predicate accepts only the known symptom, and check it against
-    real datasets of 2048 and 32768 code units in both encodings."""
+    real datasets of 2048 and 32768 code units in both encodings.
+
+    The 2048-unit stream may or may not show the symptom depending on the host; the
+    32768-unit stream must remain clean. Any observed divergence must still classify.
+    """
     passed = failed = 0
     print("== exclusion predicate (pure, no timing) ==")
     for name, oracle_pos, linear, scan, units, scan_count, expected, want in \
@@ -525,10 +529,12 @@ def self_test_gate(binary, dataset_dir, timeout):
 
     print()
     print("== real datasets (gate only, no timing) ==")
-    # 2048 code units is expected to show the symptom; 32768 is expected not to. Both are
-    # checked rather than assumed, and neither expectation is a size rule -- it is a record
-    # of what these particular generated streams do.
-    cases = [("errdens_4KiB_d1pct", 2048, True), ("errdens_64KiB_d1pct", 32768, False)]
+    # Neither case is a size rule: both are pinned streams. 32768 must stay clean. 2048
+    # historically showed the scan-tail symptom on some hosts (e.g. Apple arm64); on others
+    # (e.g. CSIL x86-64) the same bytes agree. When present, the divergence MUST still
+    # classify as the known exclusion; when absent, clean is a PASS -- not a regression.
+    # expect_symptom: True = must exclude, False = must be clean, None = either is OK.
+    cases = [("errdens_4KiB_d1pct", 2048, None), ("errdens_64KiB_d1pct", 32768, False)]
     for stem, units, expect_symptom in cases:
         for folder, encoding, be_flag in (("utf16le", "UTF-16LE", []),
                                           ("utf16be", "UTF-16BE", ["-be"])):
@@ -550,8 +556,15 @@ def self_test_gate(binary, dataset_dir, timeout):
             excluded, reason = (classify_scan_symptom(oracle_pos, linear, scan,
                                                       len(code_units), scan_count, expected)
                                 if symptom else (False, "scan agrees with the oracle"))
-            ok = (len(code_units) == units
-                  and (excluded if expect_symptom else not symptom))
+            if expect_symptom is True:
+                ok = len(code_units) == units and excluded
+                expected_label = "symptom"
+            elif expect_symptom is False:
+                ok = len(code_units) == units and not symptom
+                expected_label = "clean"
+            else:
+                ok = len(code_units) == units and (excluded if symptom else True)
+                expected_label = "symptom or clean"
             if ok:
                 passed += 1
                 print("  PASS %-30s %s %5d units  %s"
@@ -560,8 +573,7 @@ def self_test_gate(binary, dataset_dir, timeout):
             else:
                 failed += 1
                 print("  FAIL %-30s %s %5d units  expected %s, got %s"
-                      % (stem, encoding, len(code_units),
-                         "symptom" if expect_symptom else "clean", reason))
+                      % (stem, encoding, len(code_units), expected_label, reason))
     print()
     print("%d passed, %d failed" % (passed, failed))
     return failed

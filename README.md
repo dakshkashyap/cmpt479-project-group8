@@ -1121,9 +1121,10 @@ an extra position inside the valid code-unit range, a count disagreement, a wron
 
 This is deliberately *not* stated as issue #42's exact-multiple-of-4096 size condition. The
 controlled-density corpus shows the trigger is broader than that and depends on the error
-distribution: a **2048**-code-unit dataset reproduces the symptom while a **32768**-code-unit
-one does not. The predicate and both of those real datasets (in each encoding) are covered by
-a self-test that needs no timing:
+distribution: a **2048**-code-unit dataset has reproduced the symptom on some hosts while a
+**32768**-code-unit one has not. The self-test covers the predicate plus both of those real
+datasets (in each encoding); the 2048-unit case passes whether the host shows the symptom
+(and it classifies as the known exclusion) or is clean:
 
 ```bash
 ./benchmarks/benchmark_utf16_pipeline.sh --self-test-gate
