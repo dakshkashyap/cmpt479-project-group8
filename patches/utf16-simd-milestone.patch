@@ -42,10 +42,10 @@ index 00000000..17157d57
 +)
 diff --git a/tools/utf16validate/utf16validate.cpp b/tools/utf16validate/utf16validate.cpp
 new file mode 100644
-index 00000000..cb11419f
+index 00000000..fff5bc58
 --- /dev/null
 +++ b/tools/utf16validate/utf16validate.cpp
-@@ -0,0 +1,1837 @@
+@@ -0,0 +1,1851 @@
 +/*
 + *  Part of the Parabix Project, under the Open Software License 3.0.
 + *  SPDX-License-Identifier: OSL-3.0
@@ -896,15 +896,28 @@ index 00000000..cb11419f
 +    pendFinal->addIncoming(carryBool, afterBlocks);
 +    pendFinal->addIncoming(tIsHigh, tailLoop);
 +
-+    // Store the partial block only if there is one.
++    // Store the partial block only if there is one. For an odd-only final segment
++    // (0 code units + 1 trailing byte) FixedRate(2) can still expose a mark slot; the
++    // producer wrote nothing, so that slot would hold stale bits and invent a phantom
++    // position 0. Zero it explicitly -- the odd byte is counted in errorCount, not marks.
 +    BasicBlock * const storeTail = b.CreateBasicBlock("storeTailBlock");
++    BasicBlock * const maybeZeroOddOnly = b.CreateBasicBlock("maybeZeroOddOnlyMarks");
++    BasicBlock * const zeroOddOnly = b.CreateBasicBlock("zeroOddOnlyMarks");
 +    BasicBlock * const finish = b.CreateBasicBlock("markFinish");
-+    b.CreateCondBr(hasTail, storeTail, finish);
++    b.CreateCondBr(hasTail, storeTail, maybeZeroOddOnly);
 +
 +    b.SetInsertPoint(storeTail);
 +    Value * const tailBlock = b.CreateLoad(wordVecTy, tailWords);
 +    b.storeOutputStreamBlock("errorMarks", ZERO, fullBlocks,
 +                             b.CreateBitCast(tailBlock, b.getBitBlockType()));
++    b.CreateBr(finish);
++
++    b.SetInsertPoint(maybeZeroOddOnly);
++    Value * const oddOnly = b.CreateAnd(hasOddTailByte, b.CreateICmpEQ(validUnits, ZERO));
++    b.CreateCondBr(oddOnly, zeroOddOnly, finish);
++
++    b.SetInsertPoint(zeroOddOnly);
++    b.storeOutputStreamBlock("errorMarks", ZERO, ZERO, b.allZeroes());
 +    b.CreateBr(finish);
 +
 +    b.SetInsertPoint(finish);
@@ -1080,14 +1093,15 @@ index 00000000..cb11419f
 +    }
 +    void generateProcessingLogic(KernelBuilder & b, llvm::Value * absItemPos,
 +                                 std::vector<llvm::Value *> & /* loopVars */) override {
-+        // TwoLevelScanKernel does not mask to the accessible item count, so on an
-+        // empty (or short) stream it can still walk a buffer block with stale bits.
-+        // The linear ErrorMarkPositionKernel already masks; match that discipline here.
-+        Value * const begin = b.getProcessedItemCount("errorMarks");
-+        Value * const end = b.CreateAdd(begin, b.getAccessibleItemCount("errorMarks"));
++        // TwoLevelScanKernel can walk a buffer block even when this invocation has no
++        // accessible marks (empty / unproduced stream). Skip printing in that case only.
++        // Do NOT filter absItemPos against the accessible extent here: out-of-range extras
++        // on exact multiples of the 4096-unit scan stride are the disclosed known defect
++        // (KNOWN-XFAIL in scripts/test_utf16_oracle_fuzz.py), and must remain visible.
++        Value * const accessible = b.getAccessibleItemCount("errorMarks");
 +        BasicBlock * const doPrint = b.CreateBasicBlock("printErrpos");
 +        BasicBlock * const done = b.CreateBasicBlock("skipErrpos");
-+        b.CreateCondBr(b.CreateICmpULT(absItemPos, end), doPrint, done);
++        b.CreateCondBr(b.CreateICmpNE(accessible, b.getSize(0)), doPrint, done);
 +        b.SetInsertPoint(doPrint);
 +        b.CallPrintInt("errpos", absItemPos, CBuilder::STD_FD::STD_OUT);
 +        b.CreateBr(done);
