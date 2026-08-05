@@ -895,30 +895,12 @@ is every row of the manifest.
 
 ### The correctness gate
 
-<<<<<<< HEAD
-This is deliberately *not* stated as issue #42's exact-multiple-of-4096 size condition. The
-controlled-density corpus shows the trigger is broader than that and depends on the error
-distribution: a **2048**-code-unit dataset has reproduced the symptom on some hosts while a
-**32768**-code-unit one has not. The self-test covers the predicate plus both of those real
-datasets (in each encoding); the 2048-unit case passes whether the host shows the symptom
-(and it classifies as the known exclusion) or is clean:
-=======
-Before a dataset is timed, scalar, `--simd`, `--emit-error-marks`, the Python oracle,
-`--print-positions` and `--scan-error-marks` must all agree with the manifest's
-`actual_error_count`; positions must match the oracle exactly; and `--repair` output must equal
-the oracle's repaired bytes and re-validate to zero errors. **No timing row is written for a
-path that fails its gate** — the benchmark cannot report a fast number for a wrong answer.
-
-One known scan-consumer symptom is tolerated, identified **by symptom, never by input size**:
-`--scan-error-marks` reports extra positions beyond end-of-input while the oracle and
-`--print-positions` agree exactly, no real position is missing, and the scan's own `errorCount`
-is still correct. A dataset showing exactly that is excluded from **`locate_scan` timing only** —
-every other operation on it is still measured — and the reason is recorded in the CSV, the JSON
-and the summary. **Anything else aborts the run:** a missing real position, an extra position
-*inside* the valid range, a count disagreement, a wrong `--print-positions` result, or a
-difference with no extra position at all.
-
-This is deliberately **not** stated as issue #42's exact-multiple-of-4096 size condition; see
+Before timing, all validation, position, and repair paths must agree with the manifest and the
+independent oracle. Any mismatch aborts the run. The only tolerated case is the documented
+two-level scan symptom where extra positions appear beyond end-of-input while counts and all
+real positions remain correct; only `locate_scan` timing is excluded for that dataset. This
+defect is classified by symptom rather than by input size because controlled-density testing
+showed the trigger depends on both error distribution and the host/runtime environment. See
 [Known Limitation](#known-limitation).
 
 ### simdutf in the benchmark
@@ -930,7 +912,6 @@ validation returns a boolean where Parabix returns a count, and simdutf repair i
 on even-length inputs.
 
 ### Validation-throughput harness
->>>>>>> 0a5c255 (docs: finalize repository README for submission)
 
 ```bash
 BENCH_SMOKE=1 ./scripts/benchmark_utf16validate.sh              # fast harness check, temp dir
@@ -1224,14 +1205,18 @@ the valid code-unit range.
 campaign (issue #42) first exposed the symptom on inputs whose code-unit count is a positive
 exact multiple of the 4096-unit scan stride, and its KNOWN-XFAIL predicate is deliberately
 pinned to exactly those cases. Later controlled-density testing showed the trigger depends on
-the **error distribution, not only on input length**: a 2048-code-unit dataset reproduces the
-symptom while a 32768-code-unit one does not. The exact-multiple condition therefore describes
-*the fuzz driver's pinned cases*, **not the boundary of the defect** — KNOWN-XFAIL passing is
-not evidence that other inputs are unaffected. For this reason the benchmark's correctness gate
-classifies the symptom **by symptom, never by input size**, and excludes only `locate_scan`
-timing for an affected dataset while still measuring every other operation on it. No production
-code has been changed to hide it, it is reproducible on demand with
-`--strict-known-defects`, and the predicate and both real datasets are covered by
+**both the error distribution and the host/runtime environment**. A 2048-code-unit dataset has
+reproduced the symptom on some hosts, including Apple arm64, while remaining clean on others
+such as CSIL x86-64; the self-test therefore accepts either outcome for it, and requires only
+that a divergence, when it does appear, still classifies as the known exclusion. A
+32768-code-unit dataset has stayed clean everywhere it has been run, and the self-test holds it
+to that. Input length alone therefore does not characterize the defect, and the exact-multiple
+condition describes *the fuzz driver's pinned cases*, **not the boundary of the defect** —
+KNOWN-XFAIL passing is not evidence that other inputs are unaffected. For this reason the
+benchmark's correctness gate classifies the symptom **by symptom, never by input size**, and
+excludes only `locate_scan` timing for an affected dataset while still measuring every other
+operation on it. No production code has been changed to hide it, it is reproducible on demand
+with `--strict-known-defects`, and the predicate and both real datasets are covered by
 `./benchmarks/benchmark_utf16_pipeline.sh --self-test-gate`.
 
 ---
